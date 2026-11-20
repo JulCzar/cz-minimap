@@ -1,0 +1,11 @@
+{
+  "key.categories.czminimap": "CZ Minimap",
+  "key.czminimap.open_map": "Abrir/fechar mapa 3D",
+  "key.czminimap.toggle_minimap": "Alternar minimapa do HUD",
+  "key.czminimap.minimap_zoom_in": "Aproximar minimapa do HUD",
+  "key.czminimap.minimap_zoom_out": "Afastar minimapa do HUD",
+  "key.czminimap.camera_reset": "Redefinir câmera 3D",
+  "key.czminimap.return_to_player": "Retornar câmera 3D ao jogador",
+  "key.czminimap.layer_next": "Próxima camada vertical",
+  "key.czminimap.layer_previous": "Camada vertical anterior"
+}

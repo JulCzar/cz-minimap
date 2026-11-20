@@ -1,0 +1,11 @@
+{
+  "key.categories.czminimap": "CZ Minimap",
+  "key.czminimap.open_map": "Open/Close 3D Map",
+  "key.czminimap.toggle_minimap": "Toggle HUD Minimap",
+  "key.czminimap.minimap_zoom_in": "Zoom HUD Minimap In",
+  "key.czminimap.minimap_zoom_out": "Zoom HUD Minimap Out",
+  "key.czminimap.camera_reset": "Reset 3D Camera",
+  "key.czminimap.return_to_player": "Return 3D Camera to Player",
+  "key.czminimap.layer_next": "Next Vertical Layer",
+  "key.czminimap.layer_previous": "Previous Vertical Layer"
+}
