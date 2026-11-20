@@ -1,6 +1,6 @@
 # Plano de implementação
 
-> **Estado:** fases 1, 2, 3, 4, 5 e 6 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
+> **Estado:** fases 1, 2, 3, 4, 5, 6 e 7 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
 > A execução deve seguir as fases do [`AGENTS.md`](../AGENTS.md) §18, uma por vez, com validação e atualização de documentação ao final de cada uma.
 
 ## 0. Versões e ambiente verificados (19/11/2026)
@@ -35,7 +35,8 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | 4 — Persistência | Concluída em 20/11/2026 |
 | 5 — Minimap 2D | Concluída em 20/11/2026 |
 | 6 — Renderizador 3D inicial | Concluída em 20/11/2026 |
-| 7 a 10 | Não iniciadas |
+| 7 — Camadas verticais e cutaway | Concluída em 20/11/2026 |
+| 8 a 10 | Não iniciadas |
 
 ## 2. Fases
 
@@ -164,13 +165,26 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 
 ### Fase 7 — Camadas verticais e cutaway
 
+**Status: concluída.**
+
 **Tarefas:** `LayerRange` e resolução ancorada no `minY` da dimensão; modos selecionado/cumulativo/completo/cutaway; recorte horizontal e vertical; controles na tela; invalidação apenas de dados de apresentação.
+
+**Decisões adotadas**
+
+- `LayerResolver` gera intervalos half-open ancorados em `DimensionKey.minY()` e trunca o último em `maxYExclusive`; a seleção é ajustada ao intervalo que contém o jogador ao entrar ou trocar de dimensão.
+- `LayerVisibility` é um filtro imutável. O modo selecionado guarda um intervalo; o cumulativo guarda a lista de intervalos desde a seleção para cima ou para baixo; completo e cutaway cobrem toda a dimensão. As coordenadas Y dos voxels nunca são deslocadas.
+- O cutaway horizontal mantém `y < maxYExclusive` e avança em intervalos verticais. O cutaway vertical usa um plano constante em `X` ou `Z`, com lado negativo (`<`) ou positivo (`>=`) configurável; os dois planos podem ser combinados.
+- `TerrainMeshBuilder` aplica o mesmo filtro ao voxel emitido e aos sólidos usados no culling. Assim, um vizinho conhecido mas ocultado não remove a face da superfície de corte; `UNKNOWN`, `KNOWN_AIR` e `UNDERGROUND_SPACE` continuam fora da geometria.
+- `WorldMapMeshCache` valida `snapshot.version()` **e** igualdade estrutural de `LayerVisibility`; durante reconstrução progressiva, o renderer desenha somente malhas da visualização atual. Alterar modo/camada/corte não toca `CartographicMap` nem sua versão.
+- A retenção e a seleção usam o mesmo quadrado de chunks. Se `max_cached_chunks` não comportar o raio configurado, o raio efetivo cai para o maior quadrado completo que cabe; mudanças desse raio participam da invalidação, evitando rebuild infinito ou viewport stale.
+- `WorldMapScreen` oferece widgets para modo, direção cumulativa, faixa anterior/próxima, cortes horizontal/vertical, eixo, lado e deslocamento de 16 blocos. Widgets têm precedência sobre drag/scroll da câmera.
+- `layers.default_mode`, `layers.interval_size` e `layers.cumulative_direction` ficam em configuração de apresentação; nenhum deles é persistido junto aos dados cartográficos.
 
 **Critérios de aceite:** intervalos `[min, max)` com Y real preservado; cutaway nunca revela `UNKNOWN`; múltiplos intervalos; limites por dimensão.
 
-**Validação:** testes visuais por intervalo, cumulativo e cutaway, incluindo dimensões com alturas diferentes.
+**Validação executada:** 79 testes JUnit 5 passando (18 novos para intervalos half-open, Y negativo, último intervalo parcial, cumulativo/múltiplos intervalos, planos de corte, superfícies de corte entre chunks, invalidação do cache sem mudar a versão cartográfica e ajuste do raio à capacidade do cache). `./gradlew clean build`, `./gradlew runData` e uma inicialização curta de `./gradlew runClient` passaram com JDK 21 e NeoForge 21.1.267; o cliente chegou ao reload de recursos/menu sem exceções do mod e foi encerrado intencionalmente. A inspeção visual interativa dos controles em mundos/dimensões diferentes ainda depende de sessão manual.
 
-**Riscos:** manter a separação entre filtro de apresentação e modelo.
+**Riscos:** a reconstrução continua na game thread com orçamento por tick, herdado da Fase 6; alternar filtros em uma área grande pode mostrar os chunks progressivamente. O perfil de frame time e a validação visual em Overworld/Nether/End permanecem pendentes de sessão interativa.
 
 ---
 
@@ -274,9 +288,23 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | Orçamento | versão/base de cache só avança quando todos os chunks do raio são reconstruídos |
 | Config adicional | `worldmap.fov`, `render_radius`, `sensitivity`, `max_cached_chunks`, `mesh_budget`, `background_opacity` |
 
+### Adotadas na Fase 7
+
+| Decisão | Valor adotado |
+|---|---|
+| Intervalos | `[minYInclusive, maxYExclusive)`, ancorados no `minY` real; último intervalo truncado no limite da dimensão |
+| Modos | `FULL`, `SELECTED`, `CUMULATIVE` (`UP`/`DOWN`) e `CUTAWAY` |
+| Corte horizontal | plano voxel-aligned que mantém `y < maxYExclusive`, movido pela seleção de intervalo |
+| Corte vertical | plano world-space em `X` ou `Z`, lado visível `<` ou `>=`, deslocamento de 16 blocos |
+| Culling | filtro idêntico para emissão e vizinhos; sólidos ocultos expõem a face do sólido conhecido visível |
+| Cache | validade por chunk + versão do snapshot + igualdade de `LayerVisibility`; views obsoletas não são desenhadas |
+| Raio e capacidade | retenção quadrada igual à seleção; raio efetivo limitado ao maior quadrado que cabe em `max_cached_chunks` |
+| UI | widgets têm precedência sobre câmera; painel mostra faixa selecionada, span visível e limites de corte |
+| Config adicional | `layers.default_mode`; `interval_size` e `cumulative_direction` passaram a alimentar o renderer |
+
 ### A confirmar nas próximas fases
 
-1. **Estratégia de cache** (Fases 7–8): o HUD usa versão + parâmetros e o 3D usa versão + chunk + raio; falta estender as chaves com `(modo/camada/LOD)` e adicionar orçamento de memória quando LOD existir.
+1. **Estratégia de cache da Fase 8**: o HUD usa versão + parâmetros e o 3D usa versão + `LayerVisibility`; falta incluir nível/representação LOD e adicionar orçamento de memória.
 2. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
 3. **Migração de schema**: definir a cadeia quando surgir um formato v2; hoje versão diferente de 1 falha de forma controlada.
 

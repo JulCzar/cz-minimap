@@ -6,6 +6,11 @@ import com.czminimap.cartography.DiscoveryState;
 import com.czminimap.cartography.VoxelAppearance;
 import com.czminimap.core.DimensionKey;
 import com.czminimap.core.WorldKey;
+import com.czminimap.cutaway.CutawaySettings;
+import com.czminimap.layers.CumulativeDirection;
+import com.czminimap.layers.LayerMode;
+import com.czminimap.layers.LayerResolver;
+import com.czminimap.layers.LayerVisibility;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
@@ -78,10 +83,18 @@ class WorldMapMeshCacheTest {
 
         cache.retainRadius(0, 0, 1);
 
-        assertEquals(3, cache.size());
+        assertEquals(2, cache.size());
         assertFalse(cache.needsRebuild(snapshot, 0, 0));
-        assertFalse(cache.needsRebuild(snapshot, 2, 0));
-        assertTrue(cache.needsRebuild(snapshot, 3, 0));
+        assertFalse(cache.needsRebuild(snapshot, 1, 0));
+        assertTrue(cache.needsRebuild(snapshot, 2, 0));
+    }
+
+    @Test
+    void completeSquareRadiusNeverExceedsCacheLimit() {
+        assertEquals(2, WorldMapMeshCache.fitRadiusToLimit(8, 32));
+        assertEquals(3, WorldMapMeshCache.fitRadiusToLimit(8, 64));
+        assertEquals(8, WorldMapMeshCache.fitRadiusToLimit(8, 512));
+        assertEquals(0, WorldMapMeshCache.fitRadiusToLimit(3, 1));
     }
 
     @Test
@@ -94,5 +107,63 @@ class WorldMapMeshCacheTest {
 
         assertEquals(0, cache.size());
         assertTrue(cache.needsRebuild(snapshot, 0, 0));
+    }
+
+    @Test
+    void reusesMeshForEqualPresentationState() {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        CartographicMap map = mapWithStone();
+        CartographicSnapshot snapshot = map.snapshot();
+        LayerVisibility firstView = view(LayerMode.SELECTED, 8);
+        LayerVisibility equalView = view(LayerMode.SELECTED, 8);
+
+        TerrainMesh first = cache.get(snapshot, WORLD, OVERWORLD, firstView, 0, 0);
+        TerrainMesh second = cache.get(snapshot, WORLD, OVERWORLD, equalView, 0, 0);
+
+        assertSame(first, second);
+        assertFalse(cache.needsRebuild(snapshot, equalView, 0, 0));
+    }
+
+    @Test
+    void presentationChangeRebuildsWithoutChangingCartographicVersion() {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        CartographicMap map = mapWithStone();
+        CartographicSnapshot snapshot = map.snapshot();
+        long mapVersion = map.version();
+        LayerVisibility full = view(LayerMode.FULL, 8);
+        LayerVisibility selected = view(LayerMode.SELECTED, 8);
+
+        TerrainMesh first = cache.get(snapshot, WORLD, OVERWORLD, full, 0, 0);
+        assertTrue(cache.needsRebuild(snapshot, selected, 0, 0));
+        TerrainMesh second = cache.get(snapshot, WORLD, OVERWORLD, selected, 0, 0);
+
+        assertNotSame(first, second);
+        assertEquals(mapVersion, map.version());
+        assertFalse(cache.needsRebuild(snapshot, selected, 0, 0));
+    }
+
+    @Test
+    void meshCollectionExcludesEntriesFromOtherViews() {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        CartographicSnapshot snapshot = mapWithStone().snapshot();
+        LayerVisibility full = view(LayerMode.FULL, 8);
+        LayerVisibility selected = view(LayerMode.SELECTED, 8);
+
+        cache.get(snapshot, WORLD, OVERWORLD, full, 0, 0);
+        cache.get(snapshot, WORLD, OVERWORLD, selected, 1, 0);
+
+        assertEquals(1, cache.meshes(snapshot.version(), full).size());
+        assertEquals(1, cache.meshes(snapshot.version(), selected).size());
+    }
+
+    private static CartographicMap mapWithStone() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 64, 0, DiscoveryState.SOLID, STONE, 1L);
+        return map;
+    }
+
+    private static LayerVisibility view(LayerMode mode, int selectedIndex) {
+        return LayerResolver.resolve(OVERWORLD, 16, mode, selectedIndex,
+                CumulativeDirection.DOWN, CutawaySettings.none());
     }
 }

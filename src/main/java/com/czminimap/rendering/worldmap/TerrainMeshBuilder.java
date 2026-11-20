@@ -5,6 +5,11 @@ import com.czminimap.cartography.VoxelAppearance;
 import com.czminimap.core.DimensionKey;
 import com.czminimap.core.RegionKey;
 import com.czminimap.core.WorldKey;
+import com.czminimap.cutaway.CutawaySettings;
+import com.czminimap.layers.CumulativeDirection;
+import com.czminimap.layers.LayerMode;
+import com.czminimap.layers.LayerResolver;
+import com.czminimap.layers.LayerVisibility;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.core.Direction;
@@ -27,14 +32,24 @@ public final class TerrainMeshBuilder {
 
     public static TerrainMesh build(CartographicSnapshot snapshot, WorldKey world, DimensionKey dimension,
                                     int chunkX, int chunkZ, long version) {
+        LayerVisibility visibility = LayerResolver.resolve(dimension, 16, LayerMode.FULL, 0,
+                CumulativeDirection.DOWN, CutawaySettings.none());
+        return build(snapshot, world, dimension, chunkX, chunkZ, version, visibility);
+    }
+
+    public static TerrainMesh build(CartographicSnapshot snapshot, WorldKey world, DimensionKey dimension,
+                                    int chunkX, int chunkZ, long version, LayerVisibility visibility) {
         LongSet solid = new LongOpenHashSet();
-        collectSolid(snapshot, world, dimension, chunkX, chunkZ, solid);
+        collectSolid(snapshot, world, dimension, chunkX, chunkZ, visibility, solid);
 
         FloatBuffer vertices = new FloatBuffer();
         RegionKey own = new RegionKey(world, dimension,
                 RegionKey.fromChunk(chunkX), RegionKey.fromChunk(chunkZ));
         snapshot.forEachSolid(world, dimension, own, (x, y, z, state, appearance) -> {
             if ((Math.floorDiv(x, 16) != chunkX) || (Math.floorDiv(z, 16) != chunkZ)) {
+                return;
+            }
+            if (!visibility.isVisible(x, y, z)) {
                 return;
             }
             for (Direction face : Direction.values()) {
@@ -49,7 +64,7 @@ public final class TerrainMeshBuilder {
     }
 
     private static void collectSolid(CartographicSnapshot snapshot, WorldKey world, DimensionKey dimension,
-                                     int chunkX, int chunkZ, LongSet solid) {
+                                     int chunkX, int chunkZ, LayerVisibility visibility, LongSet solid) {
         for (int dz = -1; dz <= 1; dz++) {
             for (int dx = -1; dx <= 1; dx++) {
                 int targetX = chunkX + dx;
@@ -57,7 +72,8 @@ public final class TerrainMeshBuilder {
                 RegionKey region = new RegionKey(world, dimension,
                         RegionKey.fromChunk(targetX), RegionKey.fromChunk(targetZ));
                 snapshot.forEachSolid(world, dimension, region, (x, y, z, state, appearance) -> {
-                    if (Math.floorDiv(x, 16) == targetX && Math.floorDiv(z, 16) == targetZ) {
+                    if (Math.floorDiv(x, 16) == targetX && Math.floorDiv(z, 16) == targetZ
+                            && visibility.isVisible(x, y, z)) {
                         solid.add(blockKey(x, y, z));
                     }
                 });

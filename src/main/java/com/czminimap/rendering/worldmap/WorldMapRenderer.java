@@ -6,8 +6,17 @@ import com.czminimap.client.ClientGameEvents;
 import com.czminimap.client.ClientMapContext;
 import com.czminimap.client.WorldIdentityResolver;
 import com.czminimap.config.ClientConfig;
+import com.czminimap.config.MapConfig;
 import com.czminimap.core.DimensionKey;
 import com.czminimap.core.WorldKey;
+import com.czminimap.cutaway.ClipSide;
+import com.czminimap.cutaway.CutawaySettings;
+import com.czminimap.cutaway.VerticalAxis;
+import com.czminimap.layers.CumulativeDirection;
+import com.czminimap.layers.LayerMode;
+import com.czminimap.layers.LayerRange;
+import com.czminimap.layers.LayerResolver;
+import com.czminimap.layers.LayerVisibility;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -25,6 +34,7 @@ import org.joml.Matrix4fStack;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /** Client-only renderer for the full-screen voxel map. All geometry comes from cartographic snapshots. */
 public final class WorldMapRenderer {
@@ -50,8 +60,19 @@ public final class WorldMapRenderer {
     private long lastReturnRequests = -1L;
     private int lastCenterChunkX = Integer.MIN_VALUE;
     private int lastCenterChunkZ = Integer.MIN_VALUE;
+    private int lastRenderRadius = Integer.MIN_VALUE;
+    private int lastLayerStep;
+    private int selectedLayerIndex;
+    private int layerInterval = -1;
+    private long renderVersion = Long.MIN_VALUE;
     private WorldKey lastWorld;
     private DimensionKey lastDimension;
+    private DimensionKey layerDimension;
+    private LayerMode layerMode;
+    private CumulativeDirection cumulativeDirection;
+    private CutawaySettings cutaway = CutawaySettings.none();
+    private LayerVisibility layerVisibility;
+    private LayerVisibility lastBuiltVisibility;
 
     public OrbitalCamera camera() {
         return camera;
@@ -63,8 +84,10 @@ public final class WorldMapRenderer {
             return;
         }
         ClientConfig config = ClientConfig.CONFIG;
-        camera.setDistanceLimits(8.0, Math.max(96.0, config.worldMapRenderRadius.get() * 16.0 * 4.0));
-        cache.setLimit(config.worldMapMaxCachedChunks.get());
+        int cacheLimit = config.worldMapMaxCachedChunks.get();
+        int radius = WorldMapMeshCache.fitRadiusToLimit(config.worldMapRenderRadius.get(), cacheLimit);
+        camera.setDistanceLimits(8.0, Math.max(96.0, radius * 16.0 * 4.0));
+        cache.setLimit(cacheLimit);
 
         var ui = ClientGameEvents.uiState();
         if (ui.getCameraResetRequests() != lastResetRequests) {
@@ -81,33 +104,36 @@ public final class WorldMapRenderer {
             return;
         }
         DimensionKey dimension = WorldIdentityResolver.resolveDimension(minecraft.level);
+        updateLayerState(minecraft, dimension);
         CartographicMap map = ClientMapContext.get().map();
         int centerX = Math.floorDiv((int) Math.floor(camera.target().x), 16);
         int centerZ = Math.floorDiv((int) Math.floor(camera.target().z), 16);
         boolean changed = lastVersion != map.version()
                 || lastCenterChunkX != centerX
                 || lastCenterChunkZ != centerZ
+                || lastRenderRadius != radius
                 || !world.equals(lastWorld)
-                || !dimension.equals(lastDimension);
+                || !dimension.equals(lastDimension)
+                || !Objects.equals(layerVisibility, lastBuiltVisibility);
         if (!changed) {
             return;
         }
 
         CartographicSnapshot snapshot = map.snapshot();
-        int radius = config.worldMapRenderRadius.get();
+        renderVersion = snapshot.version();
         cache.retainRadius(centerX, centerZ, radius);
         List<int[]> chunks = chunksByDistance(centerX, centerZ, radius);
         int budget = config.worldMapMeshBudget.get();
         boolean allRebuilt = true;
         for (int[] chunk : chunks) {
-            if (!cache.needsRebuild(snapshot, chunk[0], chunk[1])) {
+            if (!cache.needsRebuild(snapshot, layerVisibility, chunk[0], chunk[1])) {
                 continue;
             }
             if (budget <= 0) {
                 allRebuilt = false;
                 continue;
             }
-            cache.get(snapshot, world, dimension, chunk[0], chunk[1]);
+            cache.get(snapshot, world, dimension, layerVisibility, chunk[0], chunk[1]);
             budget--;
         }
         if (!allRebuilt) {
@@ -116,8 +142,10 @@ public final class WorldMapRenderer {
         lastVersion = map.version();
         lastCenterChunkX = centerX;
         lastCenterChunkZ = centerZ;
+        lastRenderRadius = radius;
         lastWorld = world;
         lastDimension = dimension;
+        lastBuiltVisibility = layerVisibility;
     }
 
     /** Called on the render thread. Only GPU uploads and draw calls happen here. */
@@ -150,8 +178,10 @@ public final class WorldMapRenderer {
         PoseStack pose = new PoseStack();
         MultiBufferSource.BufferSource buffers = graphics.bufferSource();
         VertexConsumer consumer = buffers.getBuffer(TERRAIN);
-        for (TerrainMesh mesh : cache.meshes()) {
-            emit(consumer, pose, mesh.vertices());
+        if (layerVisibility != null) {
+            for (TerrainMesh mesh : cache.meshes(renderVersion, layerVisibility)) {
+                emit(consumer, pose, mesh.vertices());
+            }
         }
         if (minecraft.player != null) {
             var player = minecraft.player;
@@ -174,12 +204,124 @@ public final class WorldMapRenderer {
     public void invalidate() {
         cache.clear();
         lastVersion = Long.MIN_VALUE;
+        renderVersion = Long.MIN_VALUE;
         lastWorld = null;
         lastDimension = null;
+        lastRenderRadius = Integer.MIN_VALUE;
+        lastBuiltVisibility = null;
+        layerVisibility = null;
+        layerDimension = null;
+        layerInterval = -1;
     }
 
     public int cachedMeshCount() {
-        return cache.size();
+        return layerVisibility == null ? 0 : cache.meshes(renderVersion, layerVisibility).size();
+    }
+
+    public LayerMode layerMode() {
+        return layerMode == null ? MapConfig.CONFIG.defaultLayerMode.get() : layerMode;
+    }
+
+    public CumulativeDirection cumulativeDirection() {
+        return cumulativeDirection == null ? MapConfig.CONFIG.cumulativeDirection.get() : cumulativeDirection;
+    }
+
+    public LayerRange selectedLayer() {
+        if (layerDimension == null || layerInterval <= 0) {
+            return null;
+        }
+        return LayerResolver.rangeAt(layerDimension, layerInterval, selectedLayerIndex);
+    }
+
+    public List<LayerRange> visibleLayers() {
+        return layerVisibility == null ? List.of() : layerVisibility.ranges();
+    }
+
+    public CutawaySettings cutawaySettings() {
+        return cutaway;
+    }
+
+    public void cycleLayerMode() {
+        layerMode = layerMode().next();
+    }
+
+    public void changeLayer(int delta) {
+        if (layerDimension == null || layerInterval <= 0 || delta == 0) {
+            return;
+        }
+        selectedLayerIndex = LayerResolver.clampIndex(
+                layerDimension, layerInterval, selectedLayerIndex + delta);
+        syncHorizontalCut();
+    }
+
+    public void toggleCumulativeDirection() {
+        cumulativeDirection = cumulativeDirection().toggle();
+    }
+
+    public void toggleHorizontalCutaway() {
+        cutaway = cutaway.withHorizontalEnabled(!cutaway.horizontalEnabled());
+        syncHorizontalCut();
+    }
+
+    public void toggleVerticalCutaway() {
+        cutaway = cutaway.withVerticalEnabled(!cutaway.verticalEnabled());
+    }
+
+    public void toggleCutawayAxis() {
+        VerticalAxis axis = cutaway.axis().toggle();
+        int coordinate = (int) Math.floor(axis == VerticalAxis.X ? camera.target().x : camera.target().z);
+        cutaway = cutaway.withAxis(axis).withCoordinate(coordinate);
+    }
+
+    public void toggleCutawaySide() {
+        cutaway = cutaway.withVisibleSide(cutaway.visibleSide().toggle());
+    }
+
+    public void moveVerticalCut(int blocks) {
+        long moved = (long) cutaway.coordinate() + blocks;
+        int coordinate = (int) Math.clamp(moved, -30_000_000L, 30_000_000L);
+        cutaway = cutaway.withCoordinate(coordinate);
+    }
+
+    private void updateLayerState(Minecraft minecraft, DimensionKey dimension) {
+        int configuredInterval = MapConfig.CONFIG.layerInterval.get();
+        if (layerMode == null) {
+            layerMode = MapConfig.CONFIG.defaultLayerMode.get();
+        }
+        if (cumulativeDirection == null) {
+            cumulativeDirection = MapConfig.CONFIG.cumulativeDirection.get();
+        }
+
+        if (!dimension.equals(layerDimension) || configuredInterval != layerInterval) {
+            int referenceY = minecraft.player == null
+                    ? dimension.minY()
+                    : minecraft.player.blockPosition().getY();
+            if (dimension.equals(layerDimension) && layerInterval > 0) {
+                LayerRange previous = LayerResolver.rangeAt(layerDimension, layerInterval, selectedLayerIndex);
+                referenceY = previous.minYInclusive();
+            }
+            layerDimension = dimension;
+            layerInterval = configuredInterval;
+            selectedLayerIndex = LayerResolver.indexForY(dimension, configuredInterval, referenceY);
+            LayerRange selected = selectedLayer();
+            int verticalCoordinate = (int) Math.floor(camera.target().x);
+            cutaway = new CutawaySettings(true, selected.maxYExclusive(), false,
+                    VerticalAxis.X, verticalCoordinate, ClipSide.NEGATIVE);
+        }
+
+        int requestedStep = ClientGameEvents.uiState().getLayerStep();
+        int delta = requestedStep - lastLayerStep;
+        lastLayerStep = requestedStep;
+        changeLayer(delta);
+        layerVisibility = LayerResolver.resolve(dimension, configuredInterval, layerMode,
+                selectedLayerIndex, cumulativeDirection, cutaway);
+    }
+
+    private void syncHorizontalCut() {
+        LayerRange selected = selectedLayer();
+        if (selected != null) {
+            cutaway = cutaway.withMaxYExclusive(selected.maxYExclusive());
+        }
     }
 
     private void resetCamera(Minecraft minecraft) {

@@ -1,13 +1,11 @@
 package com.czminimap.config;
 
 import com.czminimap.core.WorldIdentity;
+import com.czminimap.layers.CumulativeDirection;
+import com.czminimap.layers.LayerMode;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class MapConfig {
-    public enum CumulativeDirection {
-        UP, DOWN
-    }
-
     public static final MapConfig CONFIG;
     public static final ModConfigSpec SPEC;
 
@@ -15,6 +13,7 @@ public final class MapConfig {
     public final ModConfigSpec.IntValue undergroundRadius;
     public final ModConfigSpec.IntValue maxSamplesPerTick;
     public final ModConfigSpec.IntValue layerInterval;
+    public final ModConfigSpec.EnumValue<LayerMode> defaultLayerMode;
     public final ModConfigSpec.EnumValue<CumulativeDirection> cumulativeDirection;
     public final ModConfigSpec.IntValue lodQuality;
     public final ModConfigSpec.IntValue renderDistance;
@@ -35,6 +34,8 @@ public final class MapConfig {
         builder.push("layers");
         layerInterval = builder.comment("Vertical interval size in blocks.")
                 .defineInRange("interval_size", 16, 4, 64);
+        defaultLayerMode = builder.comment("Visualization mode selected when the 3D map is first opened.")
+                .defineEnum("default_mode", LayerMode.FULL, LayerMode.values());
         cumulativeDirection = builder.comment("Direction used by cumulative layer visualization.")
                 .defineEnum("cumulative_direction", CumulativeDirection.DOWN, CumulativeDirection.values());
         builder.pop();

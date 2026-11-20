@@ -6,6 +6,13 @@ import com.czminimap.cartography.DiscoveryState;
 import com.czminimap.cartography.VoxelAppearance;
 import com.czminimap.core.DimensionKey;
 import com.czminimap.core.WorldKey;
+import com.czminimap.cutaway.ClipSide;
+import com.czminimap.cutaway.CutawaySettings;
+import com.czminimap.cutaway.VerticalAxis;
+import com.czminimap.layers.CumulativeDirection;
+import com.czminimap.layers.LayerMode;
+import com.czminimap.layers.LayerResolver;
+import com.czminimap.layers.LayerVisibility;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
@@ -98,5 +105,60 @@ class TerrainMeshBuilderTest {
             assertTrue(mesh.vertices()[i + 1] >= 70.0f && mesh.vertices()[i + 1] <= 71.0f);
             assertTrue(mesh.vertices()[i + 2] >= 3.0f && mesh.vertices()[i + 2] <= 4.0f);
         }
+    }
+
+    @Test
+    void selectedRangeOmitsSolidsOutsideItsHalfOpenBounds() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 0, 0, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 0, 16, 0, DiscoveryState.SOLID, STONE, 2L);
+        CartographicSnapshot snapshot = map.snapshot();
+        LayerVisibility selected = visibility(LayerMode.SELECTED, 4, CutawaySettings.none());
+
+        TerrainMesh mesh = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), selected);
+
+        assertEquals(24, mesh.vertexCount());
+        for (int i = 0; i < mesh.vertices().length; i += TerrainMesh.FLOATS_PER_VERTEX) {
+            assertTrue(mesh.vertices()[i + 1] >= 0.0f && mesh.vertices()[i + 1] <= 1.0f);
+        }
+    }
+
+    @Test
+    void filteredNeighbourDoesNotCullTheCutSurface() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 15, 0, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 0, 16, 0, DiscoveryState.SOLID, STONE, 2L);
+        CartographicSnapshot snapshot = map.snapshot();
+        LayerVisibility selected = visibility(LayerMode.SELECTED, 4, CutawaySettings.none());
+
+        TerrainMesh mesh = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), selected);
+
+        assertEquals(24, mesh.vertexCount());
+    }
+
+    @Test
+    void cutawayAcrossChunkBoundaryExposesOnlyKnownVisibleBlock() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 15, 64, 0, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 16, 64, 0, DiscoveryState.SOLID, STONE, 2L);
+        CartographicSnapshot snapshot = map.snapshot();
+        CutawaySettings cut = new CutawaySettings(false, OVERWORLD.maxYExclusive(), true,
+                VerticalAxis.X, 16, ClipSide.NEGATIVE);
+        LayerVisibility cutaway = visibility(LayerMode.CUTAWAY, 8, cut);
+
+        TerrainMesh visible = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), cutaway);
+        TerrainMesh hidden = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                1, 0, snapshot.version(), cutaway);
+
+        assertEquals(24, visible.vertexCount());
+        assertTrue(hidden.isEmpty());
+    }
+
+    private static LayerVisibility visibility(LayerMode mode, int selectedIndex, CutawaySettings cutaway) {
+        return LayerResolver.resolve(OVERWORLD, 16, mode, selectedIndex,
+                CumulativeDirection.DOWN, cutaway);
     }
 }
