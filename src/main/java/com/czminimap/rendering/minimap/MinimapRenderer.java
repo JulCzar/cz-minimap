@@ -29,7 +29,7 @@ public final class MinimapRenderer {
     private MinimapImage current;
     private MinimapImage pending;
 
-    private long lastSeenVersion = -1L;
+    private long lastAreaRevision = -1L;
     private long lastBuildMillis;
     private int lastCenterX = Integer.MIN_VALUE;
     private int lastCenterZ = Integer.MIN_VALUE;
@@ -44,7 +44,7 @@ public final class MinimapRenderer {
     /** Called on the game thread. Builds pixel data only when an input actually changed. */
     public void tick(Minecraft minecraft) {
         if (!isActive(minecraft)) {
-            lastSeenVersion = -1L;
+            lastAreaRevision = -1L;
             pending = null;
             return;
         }
@@ -62,9 +62,15 @@ public final class MinimapRenderer {
         boolean northUp = ClientConfig.CONFIG.northUp.get();
         int centerX = minecraft.player.blockPosition().getX();
         int centerZ = minecraft.player.blockPosition().getZ();
+        double scale = blocksPerPixel(zoom);
+        int horizontalRadius = (int) Math.ceil(width * scale * 0.5) + 1;
+        int verticalRadius = (int) Math.ceil(height * scale * 0.5) + 1;
 
         CartographicMap map = ClientMapContext.get().map();
-        boolean versionChanged = lastSeenVersion != map.version();
+        long areaRevision = map.areaRevision(world, dimension,
+                centerX - horizontalRadius, centerZ - verticalRadius,
+                centerX + horizontalRadius, centerZ + verticalRadius);
+        boolean versionChanged = lastAreaRevision != areaRevision;
         boolean inputsChanged = !world.equals(lastWorld)
                 || !dimension.equals(lastDimension)
                 || centerX != lastCenterX
@@ -85,8 +91,8 @@ public final class MinimapRenderer {
 
         CartographicSnapshot snapshot = map.snapshot();
         pending = MinimapImage.build(snapshot, world, dimension, centerX, centerZ, width, height,
-                blocksPerPixel(zoom), circular);
-        lastSeenVersion = map.version();
+                scale, circular);
+        lastAreaRevision = areaRevision;
         lastBuildMillis = now;
         lastCenterX = centerX;
         lastCenterZ = centerZ;
@@ -117,7 +123,7 @@ public final class MinimapRenderer {
     public void invalidate() {
         current = null;
         pending = null;
-        lastSeenVersion = -1L;
+        lastAreaRevision = -1L;
         lastWorld = null;
         lastDimension = null;
     }

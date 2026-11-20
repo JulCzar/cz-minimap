@@ -29,6 +29,7 @@ public final class ClientConfig {
     public final ModConfigSpec.DoubleValue worldMapSensitivity;
     public final ModConfigSpec.IntValue worldMapMaxCachedChunks;
     public final ModConfigSpec.IntValue worldMapMeshBudget;
+    public final ModConfigSpec.IntValue worldMapMeshMemoryMb;
     public final ModConfigSpec.IntValue worldMapBackgroundOpacity;
 
     private ClientConfig(ModConfigSpec.Builder builder) {
@@ -69,6 +70,8 @@ public final class ClientConfig {
                 .defineInRange("max_cached_chunks", 512, 32, 4096);
         worldMapMeshBudget = builder.comment("Maximum chunk meshes rebuilt per client tick.")
                 .defineInRange("mesh_budget", 8, 1, 64);
+        worldMapMeshMemoryMb = builder.comment("Maximum CPU memory used by cached 3D meshes, in MiB.")
+                .defineInRange("mesh_memory_mb", 128, 16, 1024);
         worldMapBackgroundOpacity = builder.comment("3D map background opacity percentage.")
                 .defineInRange("background_opacity", 92, 0, 100);
         builder.pop();

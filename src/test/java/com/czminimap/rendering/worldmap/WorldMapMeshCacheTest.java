@@ -11,6 +11,7 @@ import com.czminimap.layers.CumulativeDirection;
 import com.czminimap.layers.LayerMode;
 import com.czminimap.layers.LayerResolver;
 import com.czminimap.layers.LayerVisibility;
+import com.czminimap.lod.LodLevel;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
@@ -154,6 +155,79 @@ class WorldMapMeshCacheTest {
 
         assertEquals(1, cache.meshes(snapshot.version(), full).size());
         assertEquals(1, cache.meshes(snapshot.version(), selected).size());
+    }
+
+    @Test
+    void distantCartographicChangeDoesNotInvalidateLocalLodMesh() {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        CartographicMap map = mapWithStone();
+        LayerVisibility full = view(LayerMode.FULL, 8);
+        CartographicSnapshot firstSnapshot = map.snapshot();
+        TerrainMesh first = cache.get(firstSnapshot, WORLD, OVERWORLD,
+                full, LodLevel.LOD_2, 0, 0);
+
+        map.setVoxel(WORLD, OVERWORLD, 160, 64, 0, DiscoveryState.SOLID, STONE, 2L);
+        CartographicSnapshot secondSnapshot = map.snapshot();
+
+        assertFalse(cache.needsRebuild(secondSnapshot, WORLD, OVERWORLD,
+                full, LodLevel.LOD_2, 0, 0));
+        assertSame(first, cache.get(secondSnapshot, WORLD, OVERWORLD,
+                full, LodLevel.LOD_2, 0, 0));
+    }
+
+    @Test
+    void neighbourChangeInvalidatesBoundaryCullingMesh() {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        CartographicMap map = mapWithStone();
+        LayerVisibility full = view(LayerMode.FULL, 8);
+        CartographicSnapshot firstSnapshot = map.snapshot();
+        cache.get(firstSnapshot, WORLD, OVERWORLD, full, LodLevel.LOD_1, 0, 0);
+
+        map.setVoxel(WORLD, OVERWORLD, 16, 64, 0, DiscoveryState.SOLID, STONE, 2L);
+        CartographicSnapshot secondSnapshot = map.snapshot();
+
+        assertTrue(cache.needsRebuild(secondSnapshot, WORLD, OVERWORLD,
+                full, LodLevel.LOD_1, 0, 0));
+    }
+
+    @Test
+    void validPreviousLevelRemainsAvailableDuringLodTransition() {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        CartographicSnapshot snapshot = mapWithStone().snapshot();
+        LayerVisibility full = view(LayerMode.FULL, 8);
+        TerrainMesh detailed = cache.get(snapshot, WORLD, OVERWORLD,
+                full, LodLevel.LOD_0, 0, 0);
+
+        assertTrue(cache.needsRebuild(snapshot, WORLD, OVERWORLD,
+                full, LodLevel.LOD_3, 0, 0));
+        assertSame(detailed, cache.getFallback(snapshot, WORLD, OVERWORLD, full, 0, 0));
+    }
+
+    @Test
+    void asynchronousRequestPublishesMeshBuiltFromSnapshot() throws InterruptedException {
+        WorldMapMeshCache cache = new WorldMapMeshCache();
+        try {
+            CartographicSnapshot snapshot = mapWithStone().snapshot();
+            LayerVisibility full = view(LayerMode.FULL, 8);
+            assertTrue(cache.request(snapshot, WORLD, OVERWORLD,
+                    full, LodLevel.LOD_2, 0, 0));
+
+            long deadline = System.nanoTime() + 2_000_000_000L;
+            TerrainMesh mesh = null;
+            while (mesh == null && System.nanoTime() < deadline) {
+                cache.drainCompleted(8);
+                mesh = cache.getIfReady(snapshot, WORLD, OVERWORLD,
+                        full, LodLevel.LOD_2, 0, 0);
+                if (mesh == null) {
+                    Thread.sleep(5L);
+                }
+            }
+
+            assertTrue(mesh != null);
+            assertEquals(LodLevel.LOD_2, mesh.lodLevel());
+        } finally {
+            cache.close();
+        }
     }
 
     private static CartographicMap mapWithStone() {

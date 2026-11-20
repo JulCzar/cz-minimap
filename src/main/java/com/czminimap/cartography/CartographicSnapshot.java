@@ -9,22 +9,26 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-/** Immutable, versioned view of the cartographic model. Caches are keyed by its version. */
+/** Immutable, versioned view with per-chunk revisions for spatial cache invalidation. */
 public final class CartographicSnapshot {
     private final long version;
     private final Map<RegionKey, RegionView> regions;
     private final Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns;
+    private final Map<ChunkRevisionKey, Long> chunkRevisions;
 
     private CartographicSnapshot(long version, Map<RegionKey, RegionView> regions,
-                                 Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns) {
+                                 Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns,
+                                 Map<ChunkRevisionKey, Long> chunkRevisions) {
         this.version = version;
         this.regions = Map.copyOf(regions);
         this.surfaceColumns = Map.copyOf(surfaceColumns);
+        this.chunkRevisions = Map.copyOf(chunkRevisions);
     }
 
     static CartographicSnapshot of(long version, Map<RegionKey, RegionView> regions,
-                                   Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns) {
-        return new CartographicSnapshot(version, regions, surfaceColumns);
+                                   Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns,
+                                   Map<ChunkRevisionKey, Long> chunkRevisions) {
+        return new CartographicSnapshot(version, regions, surfaceColumns, chunkRevisions);
     }
 
     /** Callback for immutable voxel reads. Never receives live world objects. */
@@ -45,8 +49,28 @@ public final class CartographicSnapshot {
     public record SurfaceColumn(int y, DiscoveryState state, VoxelAppearance appearance) {
     }
 
+    /** Revision of cartographic data owned by one chunk. */
+    public record ChunkRevisionKey(WorldKey world, DimensionKey dimension, int chunkX, int chunkZ) {
+    }
+
     public long version() {
         return version;
+    }
+
+    public long chunkRevision(WorldKey world, DimensionKey dimension, int chunkX, int chunkZ) {
+        return chunkRevisions.getOrDefault(new ChunkRevisionKey(world, dimension, chunkX, chunkZ), 0L);
+    }
+
+    /** Includes direct neighbours because their voxels participate in boundary-face culling. */
+    public long meshRevision(WorldKey world, DimensionKey dimension, int chunkX, int chunkZ) {
+        long revision = chunkRevision(world, dimension, chunkX, chunkZ);
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                revision = Math.max(revision,
+                        chunkRevision(world, dimension, chunkX + dx, chunkZ + dz));
+            }
+        }
+        return revision;
     }
 
     public Set<RegionKey> regions() {

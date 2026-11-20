@@ -131,6 +131,61 @@ class CartographicMapTest {
     }
 
     @Test
+    void surfaceIndexFallsBackWhenTopBlockBecomesAir() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 3, 60, 4, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 3, 62, 4, DiscoveryState.EXPOSED_SURFACE, STONE, 2L);
+
+        map.setVoxel(WORLD, OVERWORLD, 3, 62, 4, DiscoveryState.KNOWN_AIR, null, 3L);
+
+        CartographicSnapshot.SurfaceColumn column = map.snapshot().surfaceAt(WORLD, OVERWORLD, 3, 4);
+        assertNotNull(column);
+        assertEquals(60, column.y());
+    }
+
+    @Test
+    void chunkMeshRevisionIncludesNeighboursButNotDistantChanges() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 64, 0, DiscoveryState.SOLID, STONE, 1L);
+        CartographicSnapshot first = map.snapshot();
+        long localRevision = first.meshRevision(WORLD, OVERWORLD, 0, 0);
+
+        map.setVoxel(WORLD, OVERWORLD, 16, 64, 0, DiscoveryState.SOLID, STONE, 2L);
+        CartographicSnapshot neighbour = map.snapshot();
+        assertTrue(neighbour.meshRevision(WORLD, OVERWORLD, 0, 0) > localRevision);
+
+        long afterNeighbour = neighbour.meshRevision(WORLD, OVERWORLD, 0, 0);
+        map.setVoxel(WORLD, OVERWORLD, 160, 64, 0, DiscoveryState.SOLID, STONE, 3L);
+        CartographicSnapshot distant = map.snapshot();
+        assertEquals(afterNeighbour, distant.meshRevision(WORLD, OVERWORLD, 0, 0));
+    }
+
+    @Test
+    void minimapAreaRevisionIgnoresDistantChanges() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 64, 0, DiscoveryState.SOLID, STONE, 1L);
+        long local = map.areaRevision(WORLD, OVERWORLD, -16, -16, 31, 31);
+
+        map.setVoxel(WORLD, OVERWORLD, 160, 64, 0, DiscoveryState.SOLID, STONE, 2L);
+
+        assertEquals(local, map.areaRevision(WORLD, OVERWORLD, -16, -16, 31, 31));
+        assertTrue(map.areaRevision(WORLD, OVERWORLD, 144, -16, 175, 31) > local);
+    }
+
+    @Test
+    void knownPositionScanNeverIncludesUnknownArraySlots() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 1, 64, 2, DiscoveryState.KNOWN_AIR, null, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 3, 65, 4, DiscoveryState.SOLID, STONE, 2L);
+
+        var positions = map.knownPositionsInChunk(WORLD, OVERWORLD, 0, 0);
+
+        assertEquals(2, positions.size());
+        assertTrue(positions.contains(com.czminimap.world.BlockPositionKey.encode(1, 64, 2)));
+        assertTrue(positions.contains(com.czminimap.world.BlockPositionKey.encode(3, 65, 4)));
+    }
+
+    @Test
     void forEachSolidVisitsOnlyDiscoveredSolidVoxels() {
         CartographicMap map = new CartographicMap();
         map.setVoxel(WORLD, OVERWORLD, 0, 64, 0, DiscoveryState.SOLID, STONE, 1L);

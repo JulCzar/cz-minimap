@@ -18,7 +18,7 @@ public final class WorldMapScreen extends Screen {
     private static final int PANEL_X = 8;
     private static final int PANEL_Y = 8;
     private static final int PANEL_WIDTH = 272;
-    private static final int PANEL_HEIGHT = 194;
+    private static final int PANEL_HEIGHT = 218;
 
     private final WorldMapRenderer renderer;
     private int dragButton = -1;
@@ -43,7 +43,7 @@ public final class WorldMapScreen extends Screen {
     @Override
     protected void init() {
         int left = PANEL_X + 4;
-        int firstRow = PANEL_Y + 96;
+        int firstRow = PANEL_Y + 108;
         modeButton = addRenderableWidget(button(left, firstRow, 124,
                 ignored -> renderer.cycleLayerMode()));
         directionButton = addRenderableWidget(button(left + 128, firstRow, 124,
@@ -177,8 +177,13 @@ public final class WorldMapScreen extends Screen {
                 x, y, 0xFFD0D0D0);
         y += 12;
         graphics.drawString(minecraft.font,
-                String.format("Distance  %.1f   Meshes  %d",
-                        renderer.camera().distance(), renderer.cachedMeshCount()),
+                String.format("Distance  %.1f   Meshes  %d   %.1f MiB",
+                        renderer.camera().distance(), renderer.cachedMeshCount(),
+                        renderer.meshMemoryBytes() / (1024.0 * 1024.0)),
+                x, y, 0xFFD0D0D0);
+        y += 12;
+        graphics.drawString(minecraft.font,
+                renderer.lodSummary() + "   Jobs " + renderer.pendingMeshCount(),
                 x, y, 0xFFD0D0D0);
         y += 12;
         LayerRange selected = renderer.selectedLayer();

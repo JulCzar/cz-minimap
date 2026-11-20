@@ -12,6 +12,8 @@ public final class MapConfig {
     public final ModConfigSpec.IntValue surfaceRadius;
     public final ModConfigSpec.IntValue undergroundRadius;
     public final ModConfigSpec.IntValue maxSamplesPerTick;
+    public final ModConfigSpec.IntValue syncScanRadiusChunks;
+    public final ModConfigSpec.IntValue syncSamplesPerTick;
     public final ModConfigSpec.IntValue layerInterval;
     public final ModConfigSpec.EnumValue<LayerMode> defaultLayerMode;
     public final ModConfigSpec.EnumValue<CumulativeDirection> cumulativeDirection;
@@ -31,6 +33,14 @@ public final class MapConfig {
                 .defineInRange("max_samples_per_tick", 512, 32, 8192);
         builder.pop();
 
+        builder.push("synchronization");
+        syncScanRadiusChunks = builder.comment(
+                        "Radius of loaded chunks whose already-discovered voxels are reconciled with client updates.")
+                .defineInRange("scan_radius_chunks", 6, 1, 16);
+        syncSamplesPerTick = builder.comment("Maximum known voxels checked for client block changes per tick.")
+                .defineInRange("max_samples_per_tick", 128, 16, 4096);
+        builder.pop();
+
         builder.push("layers");
         layerInterval = builder.comment("Vertical interval size in blocks.")
                 .defineInRange("interval_size", 16, 4, 64);
@@ -41,8 +51,8 @@ public final class MapConfig {
         builder.pop();
 
         builder.push("rendering");
-        lodQuality = builder.comment("Highest LOD detail level allowed (0 = full detail, 3 = coarse).")
-                .defineInRange("lod_quality", 0, 0, 3);
+        lodQuality = builder.comment("Maximum distance LOD allowed (0 = full detail only, 3 = aggressive).")
+                .defineInRange("lod_quality", 3, 0, 3);
         renderDistance = builder.comment("Maximum number of map regions rendered from the focal point.")
                 .defineInRange("max_render_distance", 8, 1, 32);
         cameraSensitivity = builder.comment("Orbital camera sensitivity percentage.")

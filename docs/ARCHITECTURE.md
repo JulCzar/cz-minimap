@@ -1,13 +1,13 @@
 # Arquitetura proposta
 
-> **Estado:** as fases 1 a 7 implementaram `core`, `cartography`, `world`, `discovery`, `storage`, composição cliente, o HUD 2D, o renderizador 3D, camadas verticais e cutaway. Este documento descreve a implementação real; os demais pacotes da tabela continuam como proposta para fases futuras.
+> **Estado:** as fases 1 a 9 implementaram `core`, `cartography`, `world`, `discovery`, `storage`, composição cliente, HUD 2D, renderizador 3D, camadas/cutaway, LOD híbrido e sincronização incremental de mudanças. Este documento descreve a implementação real; otimizações finais permanecem para a Fase 10.
 > As regras normativas estão em [`AGENTS.md`](../AGENTS.md). Este documento traduz essas regras em fronteiras concretas de código.
 
 ## 1. Princípio central
 
 O **modelo cartográfico persistente** é a única fonte da verdade. Minimap, malhas 3D, LOD, câmera, camadas e cutaway são projeções descartáveis, reconstruíveis a partir dele. Nenhuma projeção alimenta o modelo nem serve como fonte independente de dados de mundo.
 
-Consequência prática: todo dado de mundo que entra no modelo passa por um único caminho de escrita (coleta → descoberta → aplicação), e todo consumidor lê por snapshots imutáveis com versão.
+Consequência prática: todo dado de mundo que entra no modelo passa por um único caminho de escrita (coleta → descoberta ou reconciliação → aplicação), e todo consumidor lê por snapshots imutáveis com versão.
 
 ## 2. Fronteiras e direção das dependências
 
@@ -30,9 +30,9 @@ Consequência prática: todo dado de mundo que entra no modelo passa por um úni
 Regras de dependência:
 
 - `cartography` não depende de renderização, GUI, disco, câmera, LOD nem cortes; depende apenas de tipos do JDK e de identificadores do Minecraft.
-- `world` e `discovery` são os **únicos produtores** de mudanças no modelo. As leituras de mundo vivo acontecem apenas na game thread: `ChunkDataCollector` acessa chunks já carregados e produz `VoxelSample`s imutáveis; `DiscoveryEngine` agrega essas observações em `WorldDataSnapshot` e as entrega à `DiscoveryPolicy`, que é pura e não conhece Minecraft. Nenhum snapshot carrega referência viva de `Level`, `ChunkAccess` ou `BlockState`.
+- `world` e `discovery` são os **únicos produtores** de mudanças no modelo. As leituras de mundo vivo acontecem apenas na game thread: `ChunkDataCollector` acessa chunks já carregados e produz `VoxelSample`s imutáveis; `DiscoveryEngine` entrega observações novas à `DiscoveryPolicy`, enquanto `BlockUpdateSynchronizer` reconcilia somente posições já conhecidas. Nenhum snapshot carrega referência viva de `Level`, `ChunkAccess` ou `BlockState`.
 - `storage` serializa o modelo, mas a renderização nunca lê arquivos nem o estado mutável do storage.
-- `terrain`, `layers`, `cutaway` e `lod` derivam dados; suas caches são chaveadas por versão do snapshot e pelos parâmetros imutáveis de apresentação relevantes.
+- `terrain`, `layers`, `cutaway` e `lod` derivam dados; suas caches usam revisão por chunk, LOD e parâmetros imutáveis de apresentação.
 - `rendering` e `gui` nunca acessam `Level`/`ChunkAccess`, nem fazem I/O, nem geram malhas.
 
 ## 3. Mapa de pacotes alvo
@@ -47,16 +47,16 @@ Topologia alvo, **criada incrementalmente**. Pacotes e classes só aparecem quan
 | `com.czminimap.input` | `KeyMapping`s e ações de teclado | 1 |
 | `com.czminimap.core` | `MapManager` (implementado), identidade de mundo/dimensão; `MapContext` permanece proposto | 2/3 |
 | `com.czminimap.cartography` | modelo persistente: regiões, seções, voxels, estados, snapshots | 2 |
-| `com.czminimap.world` | `ChunkDataCollector`, `VoxelSample`, `WorldDataSnapshot`, `BlockPositionKey` | 3 |
+| `com.czminimap.world` | coleta imutável, chaves de posição e `BlockUpdateSynchronizer` incremental | 3/9 |
 | `com.czminimap.discovery` | `DiscoveryPolicy`, `ExplorationTracker`, `DiscoveryEngine`, `DiscoverySettings`, `DiscoveryResult` | 3 |
 | `com.czminimap.storage` | `RegionCodec` (`CZM1`/LZ4/CRC32), `MapStorage` (carga e escrita assíncronas, atômica, com backup e quarentena) | 4 |
 | `com.czminimap.terrain` | proposto: agregação por região e material resolver com atlas — a Fase 6 manteve a geração de malha em `rendering.worldmap` | 6 (parcial) |
 | `com.czminimap.layers` | `LayerRange`, `LayerResolver`, modos/direção e `LayerVisibility` imutável | 7 |
 | `com.czminimap.cutaway` | `CutawaySettings`, planos horizontal/vertical, eixo/lado e `ClipResolver` | 7 |
-| `com.czminimap.lod` | níveis, seleção por distância, cache e limites | 8 |
+| `com.czminimap.lod` | `LodLevel` 0..3 e `LodSelector` por tamanho projetado/distância | 8 |
 | `com.czminimap.rendering.minimap` | `MinimapColorResolver`, `MinimapImage`, `MinimapLayout` (puros) e `MinimapRenderer` (GPU) | 5 |
-| `com.czminimap.rendering.worldmap` | `OrbitalCamera`, `TerrainMeshBuilder`, `TerrainMesh`, `WorldMapMeshCache`, `WorldMapMaterialResolver`, `WorldMapRenderer` | 6/7 |
-| `com.czminimap.gui` | `WorldMapScreen` — câmera orbital, painel e controles de camadas/cutaway | 6/7 |
+| `com.czminimap.rendering.worldmap` | câmera, agregação voxel-alinhada, cache LRU/assíncrono e desenho das malhas | 6–8 |
+| `com.czminimap.gui` | mapa 3D, controles de camadas/cutaway e telemetria de LOD/jobs/memória | 6–8 |
 
 ## 4. Modelo cartográfico
 
@@ -101,7 +101,7 @@ record VoxelAppearance(ResourceLocation block, int propertiesMask,
 
 ### 4.3 Snapshots
 
-`CartographicSnapshot` carrega `version`, um mapa imutável de regiões e um **índice derivado de colunas superficiais** (`SurfaceColumnKey -> SurfaceColumn` com `y`, estado e aparência do bloco mais alto descoberto). Esse índice é mantido incrementalmente pelo único ponto de escrita (`CartographicMap.setVoxel`) e reconstruído a partir dos arrays persistidos em `loadRegion`; ele não é salvo nem tratado como fonte independente. Os limites de dimensão estão embutidos em cada `DimensionKey` das chaves. Paleta, chunks, seções, arrays e índice são copiados na construção, e a API só expõe leitura. Toda cache de apresentação é chaveada por versão do snapshot e parâmetros de visualização. Quando o modelo muda, a versão incrementa e caches antigas ficam elegíveis para evicção; nada é mutado "in place" por consumidores.
+`CartographicSnapshot` carrega `version`, revisões por chunk, um mapa imutável de regiões e um **índice derivado de colunas superficiais** (`SurfaceColumnKey -> SurfaceColumn`). O índice é mantido por `CartographicMap.setVoxel`, inclusive ao remover o topo de uma coluna, e reconstruído em `loadRegion`; ele não é persistido nem tratado como fonte independente. Paleta, chunks, seções, arrays, revisões e índice são copiados na construção. A versão global continua ordenando persistência; HUD e malhas consultam revisões espaciais para não reagir a mudanças distantes.
 
 ## 5. Fluxos de dados
 
@@ -116,17 +116,22 @@ ClientTickEvent.Post (game thread)
   -> CartographicMap.setVoxel (único ponto de escrita)
   -> regiões afetadas marcadas como dirty
   -> storage recebe job assíncrono deduplicado (flush periódico/desconexão/shutdown)
-  -> versão incrementada -> [Fases 5/6] invalida caches de apresentação
-```
+  -> versão + revisão do chunk incrementadas
 
-Mudanças de bloco recebidas pelo cliente ainda não alimentam esse fluxo (Fase 9).
+Mudança já descoberta:
+ClientLevel/chunk carregado -> BlockUpdateSynchronizer (budget + raio)
+  -> somente posições cujo estado cartográfico != UNKNOWN
+  -> CartographicMap.setVoxel -> dirty + revisão espacial
+  -> HUD invalida apenas se a revisão estiver na área visível
+  -> malha invalida o chunk e vizinhos usados no culling
+```
 
 ### Leitura (render)
 
 ```text
-CartographicSnapshot(version)
-  -> worker: gerar tile 2D / malha / LOD (somente dados imutáveis)
-  -> cache por chave (região, versão, modo)
+CartographicSnapshot(version, chunk revisions)
+  -> worker: gerar malha/LOD (somente dados imutáveis)
+  -> cache por chave (chunk, revisão, LOD, LayerVisibility)
   -> render thread: somente upload/draw do recurso já pronto
 ```
 
@@ -140,7 +145,7 @@ A HUD e o mapa 3D consomem o mesmo snapshot; nenhum dos dois escaneia o mundo.
 | Render thread | desenhar e fazer upload/destroy de recursos GPU | I/O, acesso a mundo mutável, geração de geometria |
 | Workers limitados | serialização/compressão, construção de malha a partir de snapshot, LOD, indexação | acessar mundo vivo, tocar GPU |
 
-Fila com limites e deduplicação por chave de região. Cada job carrega um `generationToken`; resultados de gerações obsoletas são descartados. Prioridade: regiões visíveis no mapa 3D → próximas ao jogador → visíveis na HUD → demais.
+`WorldMapMeshCache` usa até dois workers daemon e fila limitada. Jobs são deduplicados por geração/chunk/revisão/LOD; resultados obsoletos são descartados. `mesh_budget` limita submissões e publicações por tick. Storage mantém seu worker separado.
 
 ## 7. Persistência (Fase 4 — implementada)
 
@@ -159,7 +164,7 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 - **Subterrâneo (implementado):** BFS limitado a partir do bloco do jogador e seus 6 vizinhos. Ar conectado abaixo do heightmap = `UNDERGROUND_SPACE`; acima dele = `KNOWN_AIR` sem expansão. Sólidos encontrados na fronteira = `SOLID`. Blocos internos de montanha não são revelados por estar em chunk carregado.
 - **Orçamento:** `max_samples_per_tick` divide-se entre ar e superfície; fila de ar limitada a 16.384 posições; rebase do cursor após 8 blocos de deslocamento, mudança de raio, dimensão ou mundo.
 - **Estado:** `UNKNOWN` nunca é escrito no modelo; troca de dimensão preserva dados, troca de mundo troca o mapa. A persistência (Fase 4) salva e recarrega o estado descoberto por mundo/dimensão; a descoberta fica pausada até a carga terminar.
-- Ainda não implementado: detecção de mudanças de bloco, visibilidade direcional (olhar) fora da conectividade de ar e medição de frame time em mundo grande.
+- Ainda não implementado: visibilidade direcional (olhar) fora da conectividade de ar e medição de frame time em mundo grande.
 
 ## 9. Representação 3D, camadas, cutaway e LOD
 
@@ -168,8 +173,8 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 - `CartographicSnapshot.forEachSolid` percorre apenas `SOLID`/`EXPOSED_SURFACE` de uma região, entregando coordenadas, estado e `VoxelAppearance` imutáveis. `UNKNOWN`, `KNOWN_AIR` e `UNDERGROUND_SPACE` nunca viram geometria.
 - `TerrainMeshBuilder` gera uma malha por **chunk** (não por bloco) a partir do snapshot. Face é removida quando o vizinho é sólido conhecido, incluindo vizinhos do chunk adjacente (a amostragem cobre a vizinhança 3×3 de chunks). Cada vértice carrega posição + RGBA (7 floats).
 - `WorldMapMaterialResolver` converte `VoxelAppearance` em cor ARGB por face reaproveitando `MinimapColorResolver`; o sombreamento é fixo por direção (UP mais claro, DOWN mais escuro, lados intermediários). Não há atlas, `BlockState` vivo, tint dinâmico nem texturas — decisão explícita desta fase.
-- `WorldMapMeshCache` é LRU por chunk e valida tanto `snapshot.version()` quanto a igualdade estrutural de `LayerVisibility`. A retenção usa o mesmo quadrado solicitado pelo renderer; quando `max_cached_chunks` não comporta todo o raio configurado, o raio efetivo é reduzido ao maior quadrado completo que cabe no limite. Todo o conteúdo é reconstruível; nenhum dado cartográfico é retido.
-- `WorldMapRenderer.tick` (game thread) atualiza a câmera a partir dos pedidos de reset/retorno, delimita o raio configurado e reconstrói no máximo `mesh_budget` chunks por tick. Se o orçamento não cobre todos os chunks sujos, a versão/base não é avançada e o trabalho continua no tick seguinte.
+- A Fase 6 introduziu um LRU por chunk e orçamento por tick; a Fase 8 substituiu sua validade global e construção síncrona por revisão espacial e workers, descritos abaixo. A retenção quadrada e o ajuste de raio à capacidade permanecem.
+- `WorldMapRenderer.tick` atualiza câmera e viewport, publica resultados prontos e submete no máximo `mesh_budget` jobs. A construção de geometria não roda mais na game thread.
 - `WorldMapRenderer.render` (render thread) salva a projeção GUI, zera a translação GUI da pilha model-view, aplica `view` + projeção perspectiva, desenha as malhas com `RenderType` próprio (`POSITION_COLOR`/QUADS, `NO_CULL`, depth test) e o marcador do jogador, depois restaura projeção e model-view. Nenhuma malha é gerada nesse caminho.
 - `WorldMapScreen` mantém interação de câmera separada dos widgets: botão esquerdo rotaciona, meio/direito deslocam, roda aplica zoom, `ESC` fecha e sincroniza `ClientUiState`; cliques e scroll sobre o painel nunca movem a câmera.
 
@@ -179,13 +184,26 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 - `LayerVisibility` carrega dimensão, modo, lista imutável de intervalos e cutaway. `SELECTED` contém um intervalo; `CUMULATIVE` contém vários intervalos contíguos para `UP` ou `DOWN`; `FULL` e `CUTAWAY` cobrem todos os intervalos. O predicado só decide visibilidade e nunca modifica coordenadas ou dados cartográficos.
 - `CutawaySettings` combina opcionalmente um plano horizontal (`y < maxYExclusive`) e um plano vertical constante em `X` ou `Z`, mantendo o lado negativo (`<`) ou positivo (`>=`). `ClipResolver` é puro e opera em coordenadas reais do mundo.
 - `TerrainMeshBuilder` aplica `LayerVisibility` tanto antes de emitir um voxel quanto ao montar o conjunto de vizinhos para culling. Um bloco conhecido ocultado pelo filtro deixa de ocluir a face de corte do bloco conhecido visível. Como a entrada continua sendo `forEachSolid`, o corte não materializa `UNKNOWN` ou ar conhecido.
-- `WorldMapRenderer` resolve a seleção a partir do jogador, limita-a ao `DimensionKey`, consome os atalhos de camada e reconstrói somente malhas de apresentação. Enquanto o orçamento progride, `render` aceita apenas entradas da versão/visualização atuais, evitando desenhar filtros obsoletos. Mudanças do raio efetivo também invalidam a viewport, e o conjunto solicitado nunca excede a capacidade configurada do cache.
+- `WorldMapRenderer` resolve a seleção a partir do jogador, limita-a ao `DimensionKey`, consome atalhos e reconstrói somente malhas de apresentação. `render` aceita apenas a visualização e revisão atuais; mudanças do raio efetivo também invalidam a viewport, e o conjunto solicitado nunca excede a capacidade configurada.
 - O painel expõe modo, direção cumulativa, intervalo anterior/próximo, habilitação dos dois planos, eixo, lado e deslocamento do plano vertical. A faixa selecionada e o span efetivamente visível são mostrados com Y real.
 
-### Proposto para fases futuras
+### Implementado na Fase 8
 
-- Material resolver com UV do atlas + tint de biome + transparência e invalidação em resource reload (Fase 6 entregou apenas cor por face).
-- LOD 0..3: blocos texturizados → grupos agregados → cor dominante → silhueta regional. Seleção por distância/tamanho projetado; células com ar conhecido, desconhecido ou mistura relevante caem para LOD mais fino. Cache LRU com orçamento de memória e jobs deduplicados. (Fase 8)
+- `LodLevel` define escalas horizontais voxel-alinhadas 1/2/4/8. `LodSelector` estima pixels por bloco a partir de distância, altura da viewport e FOV, limitado por `rendering.lod_quality`.
+- `TerrainMeshBuilder` agrega uma fatia Y de cada vez. Uma célula só vira prisma maior quando todos os voxels da área são sólidos, conhecidos e visíveis; qualquer `KNOWN_AIR`, `UNKNOWN`, irregularidade ou limite de cutaway subdivide até LOD 0. Cavernas e coordenadas Y reais não são preenchidas nem deslocadas.
+- Faces agregadas consultam todos os vizinhos cobertos, inclusive em chunks adjacentes. Diferentes níveis compartilham limites inteiros; durante a troca de nível a malha anterior válida continua visível até o job novo terminar.
+- `WorldMapMeshCache` constrói em background a partir de `CartographicSnapshot`, limita entradas por `max_cached_chunks` e bytes por `mesh_memory_mb`, deduplica jobs e descarta resultados obsoletos. O painel mostra L0..L3, jobs e memória estimada.
+- `CartographicSnapshot.meshRevision` combina o chunk com a vizinhança 3×3 usada para culling. Mudança distante não invalida a malha; mudança de borda invalida os vizinhos necessários.
+
+### Implementado na Fase 9
+
+- `BlockUpdateSynchronizer` percorre de forma justa e limitada voxels já descobertos em chunks carregados ao redor do jogador. Posições por chunk ficam cacheadas até a revisão mudar; `synchronization.scan_radius_chunks` e `max_samples_per_tick` limitam o trabalho.
+- Amostras podem atualizar sólido, ar ou `VoxelAppearance`, mas uma posição `UNKNOWN` é sempre ignorada. O polling funciona em singleplayer e multiplayer sem evento servidor, pedido de chunk ou inferência de terreno.
+- Remover o topo de uma coluna reconstrói o índice superficial. A versão global continua acionando persistência, enquanto HUD e malhas usam revisões espaciais para evitar rebuild distante.
+
+### Ainda proposto
+
+- Material resolver com UV do atlas + tint de biome + transparência e invalidação em resource reload; a aparência 3D permanece cor por face.
 
 ## 10. Minimap 2D (Fase 5 — implementada)
 
@@ -199,7 +217,7 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 
 ## 11. Configuração e input
 
-- Config apenas `ModConfig.Type.CLIENT`, com `ModConfigSpec` e validação de intervalos. Apresentação separada de dados persistentes; mudar config nunca apaga mapa. Arquivos distintos: `czminimap-hud-client.toml` e `czminimap-map-client.toml` (o registro de dois specs CLIENT com o mesmo nome gera conflito no FML). A seção `worldmap` de `ClientConfig` expõe `fov`, `render_radius`, `sensitivity`, `max_cached_chunks`, `mesh_budget` e `background_opacity`; `MapConfig.layers` expõe `interval_size`, `default_mode` e `cumulative_direction`.
+- Config apenas `ModConfig.Type.CLIENT`, com `ModConfigSpec` e validação de intervalos. Apresentação separada de dados persistentes; mudar config nunca apaga mapa. Arquivos distintos: `czminimap-hud-client.toml` e `czminimap-map-client.toml`. `worldmap` expõe FOV, raio, sensibilidade, limite de chunks, orçamento por tick, `mesh_memory_mb` e fundo; `rendering.lod_quality` limita a simplificação; `synchronization` limita raio e amostras; `layers` controla intervalos e modo.
 - `KeyMapping`s registrados via `RegisterKeyMappingsEvent` no barramento do mod, somente em classe `DIST.CLIENT`; checagem em `ClientTickEvent.Post` com `consumeClick()`. Categoria própria `key.categories.czminimap` e traduções `en_us`/`pt_br`. As classes usam `@EventBusSubscriber(value = Dist.CLIENT)` sem o atributo `bus`, deprecado e removido no NeoForge 1.21.1 — o barramento é inferido pelo tipo de evento.
 - Ações: abrir/fechar mapa, alternar HUD, zoom da HUD, reset de câmera, retornar ao jogador e navegação de camadas. Defaults são provisórios e serão validados contra conflitos na Fase 1.
 
@@ -219,5 +237,7 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 | Rotação na pose, não nos dados | o cache permanece norte-acima e não precisa ser refeito quando o jogador gira |
 | Cor por face em vez de atlas | escopo escolhido para a Fase 6: reusa o resolutor do HUD e evita ciclo de vida de texturas GPU; texturas ficam para fase futura |
 | Malha por chunk com culling de vizinhos | remove faces ocultas sem objeto por bloco e mantém a vizinhança imediata para continuidade entre chunks |
-| Cache LRU por versão do snapshot | geometria é projeção descartável; trechos sujos são reconstruídos por orçamento sem tocar no modelo |
+| Revisão espacial + LRU assíncrono | uma mudança invalida somente o chunk e vizinhos de culling; jobs obsoletos são descartados e memória/quantidade têm limites |
+| LOD horizontal adaptativo | reduz superfícies extensas sem preencher ar/UNKNOWN nem deformar cavernas; mistura força subdivisão |
+| Reconciliação somente de voxels conhecidos | mudanças do cliente aparecem sem transformar chunk carregado em terreno descoberto |
 | `identity()` na pilha model-view | telas renderizam com uma translação GUI (~+9990 Z); sem isso a câmera 3D ficaria deslocada |

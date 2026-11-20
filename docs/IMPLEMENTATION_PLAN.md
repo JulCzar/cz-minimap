@@ -184,31 +184,52 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 
 **Validação executada:** 79 testes JUnit 5 passando (18 novos para intervalos half-open, Y negativo, último intervalo parcial, cumulativo/múltiplos intervalos, planos de corte, superfícies de corte entre chunks, invalidação do cache sem mudar a versão cartográfica e ajuste do raio à capacidade do cache). `./gradlew clean build`, `./gradlew runData` e uma inicialização curta de `./gradlew runClient` passaram com JDK 21 e NeoForge 21.1.267; o cliente chegou ao reload de recursos/menu sem exceções do mod e foi encerrado intencionalmente. A inspeção visual interativa dos controles em mundos/dimensões diferentes ainda depende de sessão manual.
 
-**Riscos:** a reconstrução continua na game thread com orçamento por tick, herdado da Fase 6; alternar filtros em uma área grande pode mostrar os chunks progressivamente. O perfil de frame time e a validação visual em Overworld/Nether/End permanecem pendentes de sessão interativa.
+**Riscos:** o risco original de reconstrução na game thread foi removido na Fase 8; alternar filtros ainda publica chunks progressivamente a partir dos workers. O perfil de frame time e a validação visual em Overworld/Nether/End permanecem pendentes de sessão interativa.
 
 ---
 
 ### Fase 8 — LOD híbrido
 
+**Status: concluída.**
+
 **Tarefas:** níveis 0..3; seleção por distância/tamanho projetado; agregação com simplificação de material; construção assíncrona a partir de snapshots; cache LRU com orçamento; continuidade entre regiões; compatibilidade com camadas/cutaway.
 
 **Critérios de aceite:** grandes áreas inspecionáveis sem detalhe integral; transições sem buracos; cavernas e fronteiras de desconhecido preservadas; rebuild apenas da região afetada.
 
-**Validação:** testes por nível, distância, fronteira de região e cutaway; medição de memória e picos de frame.
+**Decisões adotadas**
 
-**Riscos:** agregação atravessando ar conhecido/desconhecido; throttle de jobs.
+- `LodLevel` usa escalas horizontais 1/2/4/8. A seleção estima pixels por bloco a partir de distância, FOV e altura da viewport, limitada por `rendering.lod_quality`.
+- A agregação acontece em fatias de um bloco de altura: uma célula maior só é emitida quando toda a área é sólida, conhecida e visível. Ar, `UNKNOWN`, buraco, cutaway ou mistura geométrica força subdivisão recursiva; assim o LOD não preenche cavernas nem move Y.
+- O material de célula é o `VoxelAppearance` dominante; LOD 0 preserva a resolução de bloco. A aparência continua cor por face, decisão herdada da Fase 6.
+- `WorldMapMeshCache` usa workers daemon limitados, fila deduplicada por geração/chunk/revisão/LOD e publicação limitada por `mesh_budget`. Entradas são LRU com limites por `max_cached_chunks` e `mesh_memory_mb`.
+- Durante transição, a malha anterior continua visível enquanto tiver a mesma revisão e `LayerVisibility`; filtros obsoletos nunca são usados como fallback.
+- `CartographicSnapshot.meshRevision` inclui a vizinhança 3×3 de culling. Alteração distante reutiliza a malha; alteração no chunk ou vizinho a invalida.
+
+**Validação executada:** 95 testes JUnit 5 passando, incluindo níveis e seleção projetada, redução de geometria em superfície agregável, fallback diante de `UNKNOWN`, job assíncrono, continuidade de transição, invalidação local/vizinha e compatibilidade com camada/cutaway. `./gradlew clean build`, `./gradlew runData` e uma inicialização curta de `./gradlew runClient` passaram; o cliente concluiu reload de recursos e chegou ao menu sem exceções do mod.
+
+**Riscos:** não houve perfil interativo de frame time/memória em mundo grande. A agregação é horizontal e conservadora; terrenos irregulares preservam corretude, mas podem cair para LOD fino. Atlas/texturas continuam fora desta fase.
 
 ---
 
 ### Fase 9 — Sincronização de mudanças
 
+**Status: concluída.**
+
 **Tarefas:** captura de mudanças de bloco recebidas pelo cliente; atualização do modelo descoberto; invalidação de tiles, malhas e LOD; verificação em multiplayer.
 
 **Critérios de aceite:** mudanças recebidas aparecem nas regiões descobertas; nenhum rebuild global; nada fora da área conhecida é inferido.
 
-**Validação:** editar blocos em singleplayer e multiplayer; observar HUD e mapa 3D.
+**Decisões adotadas**
 
-**Riscos:** eventos de update disponíveis no cliente 1.21.1; deduplicação de invalidações.
+- O NeoForge 21.1.267 não oferece um evento genérico de atualização de bloco recebido no cliente. `BlockUpdateSynchronizer` faz reconciliação incremental diretamente em chunks já carregados, funcionando também quando o servidor multiplayer não possui o mod.
+- Somente posições já descobertas são amostradas. `UNKNOWN` nunca é promovido; sólido/ar/aparência podem mudar e continuam passando pelo único ponto de escrita `CartographicMap.setVoxel`.
+- A varredura alterna chunks por distância e processa no máximo 64 posições de cada chunk por passagem. As listas conhecidas são cacheadas até a revisão do chunk mudar; raio e orçamento são configuráveis em `synchronization`.
+- Remover o topo conhecido reconstrói o índice superficial. Dirty tracking e timestamps persistem a mudança pelo formato `CZM1`, sem migração de schema.
+- O HUD usa a maior revisão dos chunks visíveis, ignorando alterações distantes. Malha/LOD usam revisão do chunk + vizinhos de culling, evitando rebuild global.
+
+**Validação executada:** testes cobrem bloqueio de `UNKNOWN`, remoção para ar, colocação em ar conhecido, atualização de aparência/índice superficial, revisão de área do HUD e invalidação espacial de malha. A suíte completa, o build limpo, `runData` e o carregamento curto do cliente passaram.
+
+**Riscos:** a latência depende de `scan_radius_chunks` e `max_samples_per_tick`. A edição manual em servidor multiplayer real ainda precisa de sessão externa; não há acesso servidor nem garantia de atualização fora dos chunks carregados/raio de reconciliação.
 
 ---
 
@@ -302,11 +323,34 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | UI | widgets têm precedência sobre câmera; painel mostra faixa selecionada, span visível e limites de corte |
 | Config adicional | `layers.default_mode`; `interval_size` e `cumulative_direction` passaram a alimentar o renderer |
 
+### Adotadas na Fase 8
+
+| Decisão | Valor adotado |
+|---|---|
+| Escalas | LOD 0..3 = células horizontais 1/2/4/8, sempre com altura de um voxel |
+| Seleção | pixels projetados por bloco a partir de distância/FOV/viewport, limitada por `lod_quality` |
+| Integridade | só agrega área totalmente sólida/conhecida/visível; qualquer mistura subdivide |
+| Construção | workers daemon limitados sobre `CartographicSnapshot`; nenhuma leitura de `Level` fora da game thread |
+| Transição | mantém malha anterior de mesma revisão/view até o novo LOD ficar pronto |
+| Cache | LRU por chunk + revisão + LOD + `LayerVisibility`, limitado por quantidade e MiB |
+
+### Adotadas na Fase 9
+
+| Decisão | Valor adotado |
+|---|---|
+| Captura | reconciliação incremental de voxels conhecidos em chunks carregados, sem depender de evento servidor |
+| Segurança | posição `UNKNOWN` nunca é amostrada para escrita nem inferida |
+| Justiça | 64 posições por chunk/passagem, chunks ordenados por distância e orçamento global por tick |
+| Invalidação 3D | revisão do chunk + vizinhança 3×3 usada no culling |
+| Invalidação HUD | revisão máxima apenas da área de chunks coberta pela imagem atual |
+| Persistência | mesma dirty region e schema `CZM1`; mudança de bloco não exige migração |
+
 ### A confirmar nas próximas fases
 
-1. **Estratégia de cache da Fase 8**: o HUD usa versão + parâmetros e o 3D usa versão + `LayerVisibility`; falta incluir nível/representação LOD e adicionar orçamento de memória.
-2. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
-3. **Migração de schema**: definir a cadeia quando surgir um formato v2; hoje versão diferente de 1 falha de forma controlada.
+1. **Perfil integrado:** medir frame time, memória, throughput dos jobs LOD e latência da reconciliação em mundo grande/multiplayer.
+2. **Perfil de descoberta:** ajustar budgets e raios com medições reais.
+3. **Migração de schema:** definir a cadeia quando surgir um formato v2; hoje versão diferente de 1 falha de forma controlada.
+4. **Materiais 3D:** atlas/texturas, transparência e tint de biome continuam pendentes.
 
 ## 4. Comandos de validação (após a Fase 1)
 

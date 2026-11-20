@@ -5,7 +5,9 @@ import com.czminimap.cartography.CartographicSnapshot.SurfaceColumnKey;
 import com.czminimap.core.DimensionKey;
 import com.czminimap.core.RegionKey;
 import com.czminimap.core.WorldKey;
+import com.czminimap.world.BlockPositionKey;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -20,6 +22,7 @@ public final class CartographicMap {
     private final Map<RegionKey, Region> regions = new HashMap<>();
     private final Set<RegionKey> dirtyRegions = new HashSet<>();
     private final Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns = new HashMap<>();
+    private final Map<CartographicSnapshot.ChunkRevisionKey, Long> chunkRevisions = new HashMap<>();
     private long version;
     private long clock;
 
@@ -42,8 +45,8 @@ public final class CartographicMap {
         return drained;
     }
 
-    public void setVoxel(WorldKey world, DimensionKey dimension, int x, int y, int z,
-                          DiscoveryState state, VoxelAppearance appearance, long lastObservedTick) {
+    public boolean setVoxel(WorldKey world, DimensionKey dimension, int x, int y, int z,
+                            DiscoveryState state, VoxelAppearance appearance, long lastObservedTick) {
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(dimension, "dimension");
         Objects.requireNonNull(state, "state");
@@ -51,7 +54,7 @@ public final class CartographicMap {
             throw new IllegalArgumentException("Y " + y + " is outside " + dimension);
         }
         if (state == DiscoveryState.UNKNOWN) {
-            return;
+            return false;
         }
 
         RegionKey key = regionKey(world, dimension, x, z);
@@ -60,14 +63,41 @@ public final class CartographicMap {
             clock = Math.max(clock, lastObservedTick);
             version++;
             dirtyRegions.add(key);
+            chunkRevisions.put(new CartographicSnapshot.ChunkRevisionKey(
+                    world, dimension, Math.floorDiv(x, 16), Math.floorDiv(z, 16)), version);
             updateSurface(world, dimension, x, y, z, state, appearance);
+            return true;
         }
+        return false;
     }
 
     /** Read-only point lookup for the discovery producer, which runs on the game thread. */
     public DiscoveryState stateAt(WorldKey world, DimensionKey dimension, int x, int y, int z) {
         Region region = regions.get(regionKey(world, dimension, x, z));
         return region == null ? DiscoveryState.UNKNOWN : region.stateAt(x, y, z);
+    }
+
+    /** Returns discovered positions in one chunk for bounded client-side reconciliation. */
+    public List<Long> knownPositionsInChunk(WorldKey world, DimensionKey dimension, int chunkX, int chunkZ) {
+        Region region = regions.get(new RegionKey(world, dimension,
+                RegionKey.fromChunk(chunkX), RegionKey.fromChunk(chunkZ)));
+        return region == null ? List.of() : region.knownPositions(chunkX, chunkZ);
+    }
+
+    public long chunkRevision(WorldKey world, DimensionKey dimension, int chunkX, int chunkZ) {
+        return chunkRevisions.getOrDefault(new CartographicSnapshot.ChunkRevisionKey(
+                world, dimension, chunkX, chunkZ), 0L);
+    }
+
+    public long areaRevision(WorldKey world, DimensionKey dimension,
+                             int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ) {
+        long revision = 0L;
+        for (int chunkZ = Math.floorDiv(minBlockZ, 16); chunkZ <= Math.floorDiv(maxBlockZ, 16); chunkZ++) {
+            for (int chunkX = Math.floorDiv(minBlockX, 16); chunkX <= Math.floorDiv(maxBlockX, 16); chunkX++) {
+                revision = Math.max(revision, chunkRevision(world, dimension, chunkX, chunkZ));
+            }
+        }
+        return revision;
     }
 
     /** Immutable copy for the storage worker. Never returns a view of live arrays. */
@@ -92,20 +122,45 @@ public final class CartographicMap {
         Region region = regions.computeIfAbsent(key, ignored -> new Region());
         if (region.load(data)) {
             version++;
+            for (long packedChunk : data.chunks().keySet()) {
+                int chunkX = (int) packedChunk;
+                int chunkZ = (int) (packedChunk >>> 32);
+                chunkRevisions.put(new CartographicSnapshot.ChunkRevisionKey(
+                        key.world(), key.dimension(), chunkX, chunkZ), version);
+            }
             rebuildSurface(key, data);
         }
     }
 
     private void updateSurface(WorldKey world, DimensionKey dimension, int x, int y, int z,
                                DiscoveryState state, VoxelAppearance appearance) {
-        if (state != DiscoveryState.SOLID && state != DiscoveryState.EXPOSED_SURFACE) {
-            return;
-        }
         SurfaceColumnKey key = new SurfaceColumnKey(world, dimension, x, z);
         SurfaceColumn current = surfaceColumns.get(key);
-        if (current == null || y > current.y()) {
+        if (state != DiscoveryState.SOLID && state != DiscoveryState.EXPOSED_SURFACE) {
+            if (current != null && current.y() == y) {
+                rebuildSurfaceColumn(key);
+            }
+            return;
+        }
+        if (current == null || y >= current.y()) {
             surfaceColumns.put(key, new SurfaceColumn(y, state, appearance));
         }
+    }
+
+    private void rebuildSurfaceColumn(SurfaceColumnKey key) {
+        for (int y = key.dimension().maxYExclusive() - 1; y >= key.dimension().minY(); y--) {
+            Region region = regions.get(regionKey(key.world(), key.dimension(), key.x(), key.z()));
+            if (region == null) {
+                break;
+            }
+            VoxelValue voxel = region.voxelAt(key.x(), y, key.z());
+            if (voxel.state() == DiscoveryState.SOLID
+                    || voxel.state() == DiscoveryState.EXPOSED_SURFACE) {
+                surfaceColumns.put(key, new SurfaceColumn(y, voxel.state(), voxel.appearance()));
+                return;
+            }
+        }
+        surfaceColumns.remove(key);
     }
 
     /** Rebuilds the derived index from persisted voxel arrays; no live world access is involved. */
@@ -146,7 +201,10 @@ public final class CartographicMap {
     public CartographicSnapshot snapshot() {
         Map<RegionKey, CartographicSnapshot.RegionView> view = new LinkedHashMap<>();
         regions.forEach((key, region) -> view.put(key, region.freeze()));
-        return CartographicSnapshot.of(version, view, surfaceColumns);
+        return CartographicSnapshot.of(version, view, surfaceColumns, chunkRevisions);
+    }
+
+    private record VoxelValue(DiscoveryState state, VoxelAppearance appearance) {
     }
 
     private static final class Region {
@@ -163,6 +221,19 @@ public final class CartographicMap {
         DiscoveryState stateAt(int x, int y, int z) {
             Chunk chunk = chunks.get(CartographicSnapshot.chunkKey(Math.floorDiv(x, 16), Math.floorDiv(z, 16)));
             return chunk == null ? DiscoveryState.UNKNOWN : chunk.stateAt(x, y, z);
+        }
+
+        VoxelValue voxelAt(int x, int y, int z) {
+            Chunk chunk = chunks.get(CartographicSnapshot.chunkKey(Math.floorDiv(x, 16), Math.floorDiv(z, 16)));
+            if (chunk == null) {
+                return new VoxelValue(DiscoveryState.UNKNOWN, null);
+            }
+            return chunk.voxelAt(x, y, z, palette);
+        }
+
+        List<Long> knownPositions(int chunkX, int chunkZ) {
+            Chunk chunk = chunks.get(CartographicSnapshot.chunkKey(chunkX, chunkZ));
+            return chunk == null ? List.of() : chunk.knownPositions(chunkX, chunkZ);
         }
 
         boolean load(RegionData data) {
@@ -212,6 +283,36 @@ public final class CartographicMap {
         DiscoveryState stateAt(int x, int y, int z) {
             Section section = sections.get(Math.floorDiv(y, 16));
             return section == null ? DiscoveryState.UNKNOWN : section.stateAt(x, y, z);
+        }
+
+        VoxelValue voxelAt(int x, int y, int z, VoxelPalette palette) {
+            Section section = sections.get(Math.floorDiv(y, 16));
+            if (section == null) {
+                return new VoxelValue(DiscoveryState.UNKNOWN, null);
+            }
+            int index = CartographicSnapshot.localIndex(x, y, z);
+            DiscoveryState state = section.stateAt(index);
+            int paletteIndex = section.paletteIndices[index];
+            VoxelAppearance appearance = paletteIndex < 0 ? null : palette.get(paletteIndex);
+            return new VoxelValue(state, appearance);
+        }
+
+        List<Long> knownPositions(int chunkX, int chunkZ) {
+            ArrayList<Long> positions = new ArrayList<>();
+            for (Map.Entry<Integer, Section> sectionEntry : sections.entrySet()) {
+                int sectionY = sectionEntry.getKey();
+                Section section = sectionEntry.getValue();
+                for (int index = 0; index < RegionData.SectionData.VOXELS; index++) {
+                    if (section.stateAt(index) == DiscoveryState.UNKNOWN) {
+                        continue;
+                    }
+                    int x = chunkX * 16 + (index & 15);
+                    int z = chunkZ * 16 + ((index >> 4) & 15);
+                    int y = sectionY * 16 + ((index >> 8) & 15);
+                    positions.add(BlockPositionKey.encode(x, y, z));
+                }
+            }
+            return List.copyOf(positions);
         }
 
         long sectionTick(int sectionY) {
@@ -265,7 +366,11 @@ public final class CartographicMap {
         }
 
         DiscoveryState stateAt(int x, int y, int z) {
-            byte encoded = states[CartographicSnapshot.localIndex(x, y, z)];
+            return stateAt(CartographicSnapshot.localIndex(x, y, z));
+        }
+
+        DiscoveryState stateAt(int index) {
+            byte encoded = states[index];
             return encoded < 0 || encoded >= DiscoveryState.values().length
                     ? DiscoveryState.UNKNOWN
                     : DiscoveryState.values()[encoded];

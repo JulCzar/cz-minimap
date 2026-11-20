@@ -13,6 +13,7 @@ import com.czminimap.layers.CumulativeDirection;
 import com.czminimap.layers.LayerMode;
 import com.czminimap.layers.LayerResolver;
 import com.czminimap.layers.LayerVisibility;
+import com.czminimap.lod.LodLevel;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
@@ -155,6 +156,45 @@ class TerrainMeshBuilderTest {
 
         assertEquals(24, visible.vertexCount());
         assertTrue(hidden.isEmpty());
+    }
+
+    @Test
+    void coarseLodAggregatesACompletelyKnownSurface() {
+        CartographicMap map = new CartographicMap();
+        long tick = 1L;
+        for (int z = 0; z < 8; z++) {
+            for (int x = 0; x < 8; x++) {
+                map.setVoxel(WORLD, OVERWORLD, x, 64, z, DiscoveryState.SOLID, STONE, tick++);
+            }
+        }
+        CartographicSnapshot snapshot = map.snapshot();
+        LayerVisibility full = visibility(LayerMode.FULL, 0, CutawaySettings.none());
+
+        TerrainMesh detailed = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), full, LodLevel.LOD_0);
+        TerrainMesh coarse = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), full, LodLevel.LOD_3);
+
+        assertEquals(LodLevel.LOD_3, coarse.lodLevel());
+        assertEquals(24, coarse.vertexCount());
+        assertTrue(coarse.vertexCount() < detailed.vertexCount());
+    }
+
+    @Test
+    void coarseLodSubdividesInsteadOfFillingUnknownSpace() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 64, 0, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 1, 64, 0, DiscoveryState.SOLID, STONE, 2L);
+        map.setVoxel(WORLD, OVERWORLD, 0, 64, 1, DiscoveryState.SOLID, STONE, 3L);
+        CartographicSnapshot snapshot = map.snapshot();
+        LayerVisibility full = visibility(LayerMode.FULL, 0, CutawaySettings.none());
+
+        TerrainMesh detailed = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), full, LodLevel.LOD_0);
+        TerrainMesh coarse = TerrainMeshBuilder.build(snapshot, WORLD, OVERWORLD,
+                0, 0, snapshot.version(), full, LodLevel.LOD_1);
+
+        assertEquals(detailed.vertexCount(), coarse.vertexCount());
     }
 
     private static LayerVisibility visibility(LayerMode mode, int selectedIndex, CutawaySettings cutaway) {

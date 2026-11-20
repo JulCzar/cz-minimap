@@ -13,6 +13,7 @@ import com.czminimap.discovery.DiscoverySettings;
 import com.czminimap.rendering.minimap.MinimapRenderer;
 import com.czminimap.rendering.worldmap.WorldMapRenderer;
 import com.czminimap.storage.MapStorage;
+import com.czminimap.world.BlockUpdateSynchronizer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.entity.player.Player;
@@ -28,6 +29,7 @@ public final class ClientMapContext {
 
     private final MapManager mapManager = new MapManager();
     private final DiscoveryEngine discoveryEngine = new DiscoveryEngine(mapManager);
+    private final BlockUpdateSynchronizer blockUpdateSynchronizer = new BlockUpdateSynchronizer();
     private final MinimapRenderer minimapRenderer = new MinimapRenderer();
     private final WorldMapRenderer worldMapRenderer = new WorldMapRenderer();
     private final Set<RegionKey> pendingDirty = new HashSet<>();
@@ -79,6 +81,7 @@ public final class ClientMapContext {
             }
             mapManager.selectWorld(world);
             discoveryEngine.reset();
+            blockUpdateSynchronizer.reset();
             minimapRenderer.invalidate();
             worldMapRenderer.invalidate();
             pendingDirty.clear();
@@ -95,6 +98,10 @@ public final class ClientMapContext {
         }
 
         discoveryEngine.tick(level, player, world, dimension, DiscoverySettings.fromConfig());
+        blockUpdateSynchronizer.tick(level, world, dimension, mapManager.map(),
+                MapConfig.CONFIG.syncScanRadiusChunks.get(),
+                MapConfig.CONFIG.syncSamplesPerTick.get(),
+                player.blockPosition().getX(), player.blockPosition().getZ());
         pendingDirty.addAll(mapManager.map().drainDirtyRegions());
 
         long now = System.currentTimeMillis();
@@ -158,6 +165,7 @@ public final class ClientMapContext {
         storage.flush();
         mapManager.reset();
         discoveryEngine.reset();
+        blockUpdateSynchronizer.reset();
         minimapRenderer.invalidate();
         worldMapRenderer.invalidate();
         pendingDirty.clear();
@@ -167,7 +175,7 @@ public final class ClientMapContext {
 
     public void onShutdown() {
         minimapRenderer.close();
-        worldMapRenderer.invalidate();
+        worldMapRenderer.close();
         if (storage == null) {
             return;
         }

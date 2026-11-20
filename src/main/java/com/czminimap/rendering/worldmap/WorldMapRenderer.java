@@ -17,6 +17,8 @@ import com.czminimap.layers.LayerMode;
 import com.czminimap.layers.LayerRange;
 import com.czminimap.layers.LayerResolver;
 import com.czminimap.layers.LayerVisibility;
+import com.czminimap.lod.LodLevel;
+import com.czminimap.lod.LodSelector;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -55,30 +57,34 @@ public final class WorldMapRenderer {
     private final OrbitalCamera camera = new OrbitalCamera();
     private final WorldMapMeshCache cache = new WorldMapMeshCache();
 
-    private long lastVersion = Long.MIN_VALUE;
+    private long lastAreaRevision = Long.MIN_VALUE;
     private long lastResetRequests = -1L;
     private long lastReturnRequests = -1L;
-    private int lastCenterChunkX = Integer.MIN_VALUE;
-    private int lastCenterChunkZ = Integer.MIN_VALUE;
-    private int lastRenderRadius = Integer.MIN_VALUE;
     private int lastLayerStep;
     private int selectedLayerIndex;
     private int layerInterval = -1;
-    private long renderVersion = Long.MIN_VALUE;
     private WorldKey lastWorld;
     private DimensionKey lastDimension;
+    private int lastSnapshotCenterX = Integer.MIN_VALUE;
+    private int lastSnapshotCenterZ = Integer.MIN_VALUE;
+    private int lastSnapshotRadius = Integer.MIN_VALUE;
     private DimensionKey layerDimension;
     private LayerMode layerMode;
     private CumulativeDirection cumulativeDirection;
     private CutawaySettings cutaway = CutawaySettings.none();
     private LayerVisibility layerVisibility;
-    private LayerVisibility lastBuiltVisibility;
+    private LayerVisibility lastContextVisibility;
+    private CartographicSnapshot activeSnapshot;
+    private volatile List<TerrainMesh> renderMeshes = List.of();
+    private volatile int pendingMeshes;
+    private volatile long meshBytes;
+    private volatile int[] lodCounts = new int[4];
 
     public OrbitalCamera camera() {
         return camera;
     }
 
-    /** Called on the game thread. Refreshes camera requests and rebuilds a bounded number of chunk meshes. */
+    /** Called on the game thread. Publishes completed jobs and submits bounded immutable LOD work. */
     public void tick(Minecraft minecraft) {
         if (minecraft.level == null || minecraft.player == null) {
             return;
@@ -88,6 +94,7 @@ public final class WorldMapRenderer {
         int radius = WorldMapMeshCache.fitRadiusToLimit(config.worldMapRenderRadius.get(), cacheLimit);
         camera.setDistanceLimits(8.0, Math.max(96.0, radius * 16.0 * 4.0));
         cache.setLimit(cacheLimit);
+        cache.setByteLimit(config.worldMapMeshMemoryMb.get() * 1024L * 1024L);
 
         var ui = ClientGameEvents.uiState();
         if (ui.getCameraResetRequests() != lastResetRequests) {
@@ -108,44 +115,68 @@ public final class WorldMapRenderer {
         CartographicMap map = ClientMapContext.get().map();
         int centerX = Math.floorDiv((int) Math.floor(camera.target().x), 16);
         int centerZ = Math.floorDiv((int) Math.floor(camera.target().z), 16);
-        boolean changed = lastVersion != map.version()
-                || lastCenterChunkX != centerX
-                || lastCenterChunkZ != centerZ
-                || lastRenderRadius != radius
-                || !world.equals(lastWorld)
-                || !dimension.equals(lastDimension)
-                || !Objects.equals(layerVisibility, lastBuiltVisibility);
-        if (!changed) {
-            return;
+        boolean spatialContextChanged = !world.equals(lastWorld) || !dimension.equals(lastDimension);
+        boolean contextChanged = spatialContextChanged
+                || !Objects.equals(layerVisibility, lastContextVisibility);
+        if (contextChanged) {
+            cache.setContext(world, dimension, layerVisibility);
         }
-
-        CartographicSnapshot snapshot = map.snapshot();
-        renderVersion = snapshot.version();
-        cache.retainRadius(centerX, centerZ, radius);
-        List<int[]> chunks = chunksByDistance(centerX, centerZ, radius);
-        int budget = config.worldMapMeshBudget.get();
-        boolean allRebuilt = true;
-        for (int[] chunk : chunks) {
-            if (!cache.needsRebuild(snapshot, layerVisibility, chunk[0], chunk[1])) {
-                continue;
-            }
-            if (budget <= 0) {
-                allRebuilt = false;
-                continue;
-            }
-            cache.get(snapshot, world, dimension, layerVisibility, chunk[0], chunk[1]);
-            budget--;
+        int revisionRadius = radius + 1;
+        long areaRevision = map.areaRevision(world, dimension,
+                (centerX - revisionRadius) * 16, (centerZ - revisionRadius) * 16,
+                (centerX + revisionRadius) * 16 + 15, (centerZ + revisionRadius) * 16 + 15);
+        boolean viewportChanged = centerX != lastSnapshotCenterX
+                || centerZ != lastSnapshotCenterZ || radius != lastSnapshotRadius;
+        if (activeSnapshot == null || spatialContextChanged
+                || lastAreaRevision != areaRevision || viewportChanged) {
+            activeSnapshot = map.snapshot();
+            lastAreaRevision = areaRevision;
+            lastSnapshotCenterX = centerX;
+            lastSnapshotCenterZ = centerZ;
+            lastSnapshotRadius = radius;
         }
-        if (!allRebuilt) {
-            return;
-        }
-        lastVersion = map.version();
-        lastCenterChunkX = centerX;
-        lastCenterChunkZ = centerZ;
-        lastRenderRadius = radius;
         lastWorld = world;
         lastDimension = dimension;
-        lastBuiltVisibility = layerVisibility;
+        lastContextVisibility = layerVisibility;
+        cache.retainRadius(centerX, centerZ, radius);
+        int budget = config.worldMapMeshBudget.get();
+        cache.drainCompleted(budget);
+
+        List<int[]> chunks = chunksByDistance(centerX, centerZ, radius);
+        List<TerrainMesh> ready = new ArrayList<>(chunks.size());
+        int[] readyByLod = new int[4];
+        int submissions = budget;
+        var eye = camera.eye();
+        int viewportHeight = minecraft.getWindow().getHeight();
+        double fov = config.worldMapFov.get();
+        int maximumLod = MapConfig.CONFIG.lodQuality.get();
+        for (int[] chunk : chunks) {
+            double chunkX = chunk[0] * 16.0 + 8.0;
+            double chunkZ = chunk[1] * 16.0 + 8.0;
+            double dx = eye.x - chunkX;
+            double dy = eye.y - camera.target().y;
+            double dz = eye.z - chunkZ;
+            LodLevel lod = LodSelector.select(Math.sqrt(dx * dx + dy * dy + dz * dz),
+                    viewportHeight, fov, maximumLod);
+            TerrainMesh mesh = cache.getIfReady(activeSnapshot, world, dimension,
+                    layerVisibility, lod, chunk[0], chunk[1]);
+            if (mesh == null) {
+                if (submissions > 0 && cache.request(activeSnapshot, world, dimension,
+                        layerVisibility, lod, chunk[0], chunk[1])) {
+                    submissions--;
+                }
+                mesh = cache.getFallback(activeSnapshot, world, dimension,
+                        layerVisibility, chunk[0], chunk[1]);
+            }
+            if (mesh != null) {
+                ready.add(mesh);
+                readyByLod[mesh.lodLevel().index()]++;
+            }
+        }
+        renderMeshes = List.copyOf(ready);
+        lodCounts = readyByLod;
+        pendingMeshes = cache.pendingCount();
+        meshBytes = cache.estimatedBytes();
     }
 
     /** Called on the render thread. Only GPU uploads and draw calls happen here. */
@@ -178,10 +209,8 @@ public final class WorldMapRenderer {
         PoseStack pose = new PoseStack();
         MultiBufferSource.BufferSource buffers = graphics.bufferSource();
         VertexConsumer consumer = buffers.getBuffer(TERRAIN);
-        if (layerVisibility != null) {
-            for (TerrainMesh mesh : cache.meshes(renderVersion, layerVisibility)) {
-                emit(consumer, pose, mesh.vertices());
-            }
+        for (TerrainMesh mesh : renderMeshes) {
+            emit(consumer, pose, mesh.vertices());
         }
         if (minecraft.player != null) {
             var player = minecraft.player;
@@ -203,19 +232,44 @@ public final class WorldMapRenderer {
     /** Invalidates presentation caches without touching GPU resources. */
     public void invalidate() {
         cache.clear();
-        lastVersion = Long.MIN_VALUE;
-        renderVersion = Long.MIN_VALUE;
+        lastAreaRevision = Long.MIN_VALUE;
         lastWorld = null;
         lastDimension = null;
-        lastRenderRadius = Integer.MIN_VALUE;
-        lastBuiltVisibility = null;
+        lastContextVisibility = null;
+        lastSnapshotCenterX = Integer.MIN_VALUE;
+        lastSnapshotCenterZ = Integer.MIN_VALUE;
+        lastSnapshotRadius = Integer.MIN_VALUE;
+        activeSnapshot = null;
+        renderMeshes = List.of();
+        pendingMeshes = 0;
+        meshBytes = 0L;
+        lodCounts = new int[4];
         layerVisibility = null;
         layerDimension = null;
         layerInterval = -1;
     }
 
     public int cachedMeshCount() {
-        return layerVisibility == null ? 0 : cache.meshes(renderVersion, layerVisibility).size();
+        return renderMeshes.size();
+    }
+
+    public int pendingMeshCount() {
+        return pendingMeshes;
+    }
+
+    public long meshMemoryBytes() {
+        return meshBytes;
+    }
+
+    public String lodSummary() {
+        int[] counts = lodCounts;
+        return "L0 " + counts[0] + "  L1 " + counts[1]
+                + "  L2 " + counts[2] + "  L3 " + counts[3];
+    }
+
+    public void close() {
+        invalidate();
+        cache.close();
     }
 
     public LayerMode layerMode() {
