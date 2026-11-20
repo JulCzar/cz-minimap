@@ -6,7 +6,9 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.minecraft.client.Minecraft;
+import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.event.GameShuttingDownEvent;
 
 @EventBusSubscriber(modid = CzMinimap.MOD_ID, value = Dist.CLIENT)
 public final class ClientGameEvents {
@@ -43,5 +45,15 @@ public final class ClientGameEvents {
             UI_STATE.changeLayer(-1);
         }
         ClientMapContext.get().onClientTick(Minecraft.getInstance());
+    }
+
+    @SubscribeEvent
+    public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        ClientMapContext.get().onDisconnect();
+    }
+
+    @SubscribeEvent
+    public static void onShuttingDown(GameShuttingDownEvent event) {
+        ClientMapContext.get().onShutdown();
     }
 }

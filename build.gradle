@@ -134,6 +134,10 @@ dependencies {
     // Example project dependency using a sister or child project:
     // implementation project(":myproject")
 
+    // LZ4 is used by the versioned region format and is embedded so the mod stays standalone.
+    implementation 'org.lz4:lz4-java:1.8.0'
+    jarJar 'org.lz4:lz4-java:1.8.0'
+
     testImplementation platform('org.junit:junit-bom:5.11.4')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

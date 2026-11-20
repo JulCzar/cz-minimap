@@ -1,6 +1,6 @@
 # Arquitetura proposta
 
-> **Estado:** as fases 1 a 3 implementaram `core`, `cartography`, `world`, `discovery` e a composição cliente. Este documento descreve a implementação real; os demais pacotes da tabela continuam como proposta para fases futuras.
+> **Estado:** as fases 1 a 4 implementaram `core`, `cartography`, `world`, `discovery`, `storage` e a composição cliente. Este documento descreve a implementação real; os demais pacotes da tabela continuam como proposta para fases futuras.
 > As regras normativas estão em [`AGENTS.md`](../AGENTS.md). Este documento traduz essas regras em fronteiras concretas de código.
 
 ## 1. Princípio central
@@ -49,7 +49,7 @@ Topologia alvo, **criada incrementalmente**. Pacotes e classes só aparecem quan
 | `com.czminimap.cartography` | modelo persistente: regiões, seções, voxels, estados, snapshots | 2 |
 | `com.czminimap.world` | `ChunkDataCollector`, `VoxelSample`, `WorldDataSnapshot`, `BlockPositionKey` | 3 |
 | `com.czminimap.discovery` | `DiscoveryPolicy`, `ExplorationTracker`, `DiscoveryEngine`, `DiscoverySettings`, `DiscoveryResult` | 3 |
-| `com.czminimap.storage` | formato de região, escrita atômica, fila assíncrona, migração | 4 |
+| `com.czminimap.storage` | `RegionCodec` (`CZM1`/LZ4/CRC32), `MapStorage` (carga e escrita assíncronas, atômica, com backup e quarentena) | 4 |
 | `com.czminimap.terrain` | resolução de material, geração de malha, agregação por região | 6 |
 | `com.czminimap.layers` | intervalos verticais e modos de visualização | 7 |
 | `com.czminimap.cutaway` | recorte horizontal/vertical e resolução de clip | 7 |
@@ -115,7 +115,7 @@ ClientTickEvent.Post (game thread)
   -> WorldDataSnapshot -> DiscoveryPolicy -> DiscoveryResult
   -> CartographicMap.setVoxel (único ponto de escrita)
   -> regiões afetadas marcadas como dirty
-  -> [Fase 4] storage recebe job assíncrono deduplicado
+  -> storage recebe job assíncrono deduplicado (flush periódico/desconexão/shutdown)
   -> versão incrementada -> [Fases 5/6] invalida caches de apresentação
 ```
 
@@ -142,24 +142,23 @@ A HUD e o mapa 3D consomem o mesmo snapshot; nenhum dos dois escaneia o mundo.
 
 Fila com limites e deduplicação por chave de região. Cada job carrega um `generationToken`; resultados de gerações obsoletas são descartados. Prioridade: regiões visíveis no mapa 3D → próximas ao jogador → visíveis na HUD → demais.
 
-## 7. Persistência proposta (Fase 4 — não implementada)
+## 7. Persistência (Fase 4 — implementada)
 
-> Caminho e codec abaixo são propostas em conflito com o plano (`.minecraft/czminimap` + LZ4); serão unificados ao implementar a Fase 4.
-
-- Local: `config/czminimap/data/<worldHash>/dimensions/<namespace>/<path>/regions/r.<x>.<z>.bin` (nomes de dimensão escapados para filesystem).
-- Arquivo de região: cabeçalho com magic `CZM1`, versão de schema, hash de mundo, `DimensionKey`, coordenadas, flags, tamanho e checksum; payload com índice de seções + paleta + bitsets + metadados.
-- Compressão: `java.util.zip.Deflater`/`Inflater` como primeira opção (zero dependências); LZ4 apenas se houver justificativa de performance.
-- Escrita: arquivo temporário no mesmo diretório → flush → `Files.move` com `ATOMIC_MOVE` e `REPLACE_EXISTING`, com fallback e `.bak` para recuperação.
-- Dirty tracking + flush periódico, na desconexão, na troca de dimensão e no shutdown. Fila assíncrona limitada; nunca na render thread.
-- Arquivo corrompido: log, quarentena (`.corrupt`) e região vazia em memória — nunca crash.
-- Migração: cadeia de `StorageMigration` por versão; versão mais nova que a suportada = falha controlada com mensagem clara.
+- Local: `<gameDir>/czminimap/<storageId>/dimensions/<namespace>/<path>/regions/r.<x>.<z>.bin`. `storageId` é o identificador local do mundo (nome sanitizado + hash configurável; modos `HASH_ONLY`/`NAME_ONLY` também são suportados). Nenhum endereço, seed ou credencial é gravado.
+- Cabeçalho `CZM1`: magic (4 bytes), `schemaVersion` (int), `storageId`, id da dimensão, `minY`, `maxYExclusive`, coordenadas da região, tamanhos bruto/comprimido e CRC32. O payload contém paleta + chunks + seções (arrays de estados e índices de paleta + `lastObservedTick`), comprimido com **LZ4**. lz4-java 1.8.0 é declarado no build e embutido via `jarJar`, mantendo o mod standalone.
+- Toda leitura valida magic, versão, limites, tamanhos, CRC, coordenadas de chunk dentro da região, limites de Y da dimensão, ordinais de estado e índices de paleta. Versão futura = falha controlada; cadeia de migração ficará para quando existir um schema v2.
+- Escrita: `.tmp` no mesmo diretório → cópia do arquivo anterior para `.bak` → `ATOMIC_MOVE` com fallback para `REPLACE_EXISTING`. Se o arquivo principal estiver ausente ou inválido, o carregador tenta `.tmp` e `.bak` e promove o primeiro válido. Inválidos vão para `.corrupt`.
+- `MapStorage` usa um único worker daemon. A fila de escrita tem limite de 256 regiões e deduplicação por `RegionKey`; quando está cheia, a região continua suja e é reenviada no próximo flush. `flush()` espera as escritas enfileiradas; `close()` faz flush e encerra o worker.
+- Carga: `requestLoad(world)` varre todas as dimensões salvas no worker e publica um `LoadBatch` com token. `ClientMapContext` pausa a descoberta até aplicar o batch no game thread (gate), remapeando a `WorldKey` ativa porque o nome de exibição não é persistido. Dados salvos são mesclados por seção usando `lastObservedTick`: observações mais novas nunca são sobrescritas por dados antigos.
+- O relógio de observação é monotônico entre sessões (`CartographicMap.clock()`), evitando que um tick reiniciado no cliente faça dados antigos vencerem descobertas novas.
+- Flush: a cada `storage.flush_interval_seconds` (config, padrão 30 s), na troca de mundo, em `ClientPlayerNetworkEvent.LoggingOut` e em `GameShuttingDownEvent`. Nenhum I/O acontece na render thread.
 
 ## 8. Descoberta
 
 - **Superfície (implementado):** cursor espiral sobre colunas no raio configurado; `WORLD_SURFACE` fornece o topo, amostrado junto com até dois blocos abaixo. Topo = `EXPOSED_SURFACE`; inferiores expostos lateralmente = `SOLID`. Sem raycast.
 - **Subterrâneo (implementado):** BFS limitado a partir do bloco do jogador e seus 6 vizinhos. Ar conectado abaixo do heightmap = `UNDERGROUND_SPACE`; acima dele = `KNOWN_AIR` sem expansão. Sólidos encontrados na fronteira = `SOLID`. Blocos internos de montanha não são revelados por estar em chunk carregado.
 - **Orçamento:** `max_samples_per_tick` divide-se entre ar e superfície; fila de ar limitada a 16.384 posições; rebase do cursor após 8 blocos de deslocamento, mudança de raio, dimensão ou mundo.
-- **Estado:** `UNKNOWN` nunca é escrito no modelo; troca de dimensão preserva dados, troca de mundo troca o mapa. A persistência (Fase 4) ainda não existe, então o estado descoberto é volátil entre sessões.
+- **Estado:** `UNKNOWN` nunca é escrito no modelo; troca de dimensão preserva dados, troca de mundo troca o mapa. A persistência (Fase 4) salva e recarrega o estado descoberto por mundo/dimensão; a descoberta fica pausada até a carga terminar.
 - Ainda não implementado: detecção de mudanças de bloco, visibilidade direcional (olhar) fora da conectividade de ar e medição de frame time em mundo grande.
 
 ## 9. Representação 3D, camadas, cutaway e LOD
@@ -185,5 +184,5 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 | Campo temporal separado do estado | evita combinações contraditórias de flags de descoberta |
 | Um único ponto de escrita no modelo | facilita a invalidação, a persistência e a auditoria do que foi descoberto |
 | Entrypoint comum sem imports de cliente | mantém classes de cliente fora do caminho do servidor dedicado |
-| Compressão JDK primeiro | evita dependência de terceiros sem necessidade técnica |
+| LZ4 embutido via `jarJar` | compressão rápida para regiões esparsas sem exigir instalação separada; alternativa JDK era mais lenta e não justificava a perda de performance |
 | Face culling antes de greedy meshing | corretude e debug primeiro; otimização entra com perfil |

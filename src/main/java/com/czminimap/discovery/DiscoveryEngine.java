@@ -28,12 +28,19 @@ public final class DiscoveryEngine {
         this.mapManager = mapManager;
     }
 
+    /** Clears spatial tracking when the world, dimension or loaded data changes. */
+    public void reset() {
+        tracker.reset();
+        this.dimension = null;
+    }
+
     public void tick(ClientLevel level, Player player, WorldKey world, DimensionKey dimension,
                      DiscoverySettings settings) {
         if (mapManager.selectWorld(world) || !dimension.equals(this.dimension)) {
             tracker.reset();
             this.dimension = dimension;
         }
+        tick = Math.max(tick, mapManager.map().clock()) + 1;
 
         BlockPos position = player.blockPosition();
         tracker.update(position.getX(), position.getZ(), settings.surfaceRadius(), settings.undergroundRadius());

@@ -8,6 +8,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -17,9 +18,15 @@ public final class CartographicMap {
     private final Map<RegionKey, Region> regions = new HashMap<>();
     private final Set<RegionKey> dirtyRegions = new HashSet<>();
     private long version;
+    private long clock;
 
     public long version() {
         return version;
+    }
+
+    /** Highest observation tick ever seen; keeps discovery timestamps monotonic across sessions. */
+    public long clock() {
+        return clock;
     }
 
     public boolean isDirty() {
@@ -33,7 +40,7 @@ public final class CartographicMap {
     }
 
     public void setVoxel(WorldKey world, DimensionKey dimension, int x, int y, int z,
-                         DiscoveryState state, VoxelAppearance appearance, long lastObservedTick) {
+                          DiscoveryState state, VoxelAppearance appearance, long lastObservedTick) {
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(dimension, "dimension");
         Objects.requireNonNull(state, "state");
@@ -47,6 +54,7 @@ public final class CartographicMap {
         RegionKey key = regionKey(world, dimension, x, z);
         Region region = regions.computeIfAbsent(key, ignored -> new Region());
         if (region.setVoxel(x, y, z, state, appearance, lastObservedTick)) {
+            clock = Math.max(clock, lastObservedTick);
             version++;
             dirtyRegions.add(key);
         }
@@ -56,6 +64,31 @@ public final class CartographicMap {
     public DiscoveryState stateAt(WorldKey world, DimensionKey dimension, int x, int y, int z) {
         Region region = regions.get(regionKey(world, dimension, x, z));
         return region == null ? DiscoveryState.UNKNOWN : region.stateAt(x, y, z);
+    }
+
+    /** Immutable copy for the storage worker. Never returns a view of live arrays. */
+    public RegionData regionData(RegionKey key) {
+        Objects.requireNonNull(key, "key");
+        Region region = regions.get(key);
+        return region == null ? RegionData.empty() : region.freezeData();
+    }
+
+    /** Merges persisted data. Loaded data is never marked dirty and never overwrites newer observations. */
+    public void loadRegion(RegionKey key, RegionData data) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(data, "data");
+        if (data.isEmpty()) {
+            return;
+        }
+        for (RegionData.ChunkData chunk : data.chunks().values()) {
+            for (RegionData.SectionData section : chunk.sections().values()) {
+                clock = Math.max(clock, section.lastObservedTick());
+            }
+        }
+        Region region = regions.computeIfAbsent(key, ignored -> new Region());
+        if (region.load(data)) {
+            version++;
+        }
     }
 
     private static RegionKey regionKey(WorldKey world, DimensionKey dimension, int x, int z) {
@@ -84,6 +117,35 @@ public final class CartographicMap {
             return chunk == null ? DiscoveryState.UNKNOWN : chunk.stateAt(x, y, z);
         }
 
+        boolean load(RegionData data) {
+            int[] remap = new int[data.palette().size()];
+            for (int i = 0; i < remap.length; i++) {
+                remap[i] = palette.indexOf(data.palette().get(i));
+            }
+
+            boolean changed = false;
+            for (Map.Entry<Long, RegionData.ChunkData> chunkEntry : data.chunks().entrySet()) {
+                Chunk chunk = chunks.computeIfAbsent(chunkEntry.getKey(), ignored -> new Chunk());
+                for (Map.Entry<Integer, RegionData.SectionData> sectionEntry : chunkEntry.getValue().sections().entrySet()) {
+                    int sectionY = sectionEntry.getKey();
+                    RegionData.SectionData incoming = sectionEntry.getValue();
+                    if (chunk.sectionTick(sectionY) >= incoming.lastObservedTick()) {
+                        continue;
+                    }
+                    chunk.sections.put(sectionY, Section.from(incoming, remap));
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        RegionData freezeData() {
+            List<VoxelAppearance> frozenPalette = palette.freeze();
+            Map<Long, RegionData.ChunkData> frozenChunks = new LinkedHashMap<>();
+            chunks.forEach((key, chunk) -> frozenChunks.put(key, chunk.freezeData()));
+            return new RegionData(frozenPalette, frozenChunks);
+        }
+
         CartographicSnapshot.RegionView freeze() {
             Map<Long, CartographicSnapshot.ChunkView> frozenChunks = new LinkedHashMap<>();
             chunks.forEach((key, chunk) -> frozenChunks.put(key, chunk.freeze()));
@@ -104,6 +166,18 @@ public final class CartographicMap {
             return section == null ? DiscoveryState.UNKNOWN : section.stateAt(x, y, z);
         }
 
+        long sectionTick(int sectionY) {
+            Section section = sections.get(sectionY);
+            return section == null ? Long.MIN_VALUE : section.lastObservedTick;
+        }
+
+        RegionData.ChunkData freezeData() {
+            Map<Integer, RegionData.SectionData> frozen = new LinkedHashMap<>();
+            sections.forEach((key, section) -> frozen.put(key,
+                    new RegionData.SectionData(section.states, section.paletteIndices, section.lastObservedTick)));
+            return new RegionData.ChunkData(frozen);
+        }
+
         CartographicSnapshot.ChunkView freeze() {
             Map<Integer, CartographicSnapshot.SectionView> frozenSections = new LinkedHashMap<>();
             sections.forEach((key, section) -> frozenSections.put(key, section.freeze()));
@@ -112,8 +186,8 @@ public final class CartographicMap {
     }
 
     private static final class Section {
-        private final byte[] states = new byte[16 * 16 * 16];
-        private final int[] paletteIndices = new int[16 * 16 * 16];
+        private byte[] states = new byte[16 * 16 * 16];
+        private int[] paletteIndices = new int[16 * 16 * 16];
         private long lastObservedTick = Long.MIN_VALUE;
 
         private Section() {
@@ -130,11 +204,27 @@ public final class CartographicMap {
             return changed;
         }
 
+        static Section from(RegionData.SectionData data, int[] remap) {
+            Section section = new Section();
+            section.states = data.states();
+            int[] source = data.paletteIndices();
+            for (int i = 0; i < source.length; i++) {
+                int index = source[i];
+                section.paletteIndices[i] = index < 0 || index >= remap.length ? -1 : remap[index];
+            }
+            section.lastObservedTick = data.lastObservedTick();
+            return section;
+        }
+
         DiscoveryState stateAt(int x, int y, int z) {
             byte encoded = states[CartographicSnapshot.localIndex(x, y, z)];
             return encoded < 0 || encoded >= DiscoveryState.values().length
                     ? DiscoveryState.UNKNOWN
                     : DiscoveryState.values()[encoded];
+        }
+
+        RegionData.SectionData freezeData() {
+            return new RegionData.SectionData(states, paletteIndices, lastObservedTick);
         }
 
         CartographicSnapshot.SectionView freeze() {

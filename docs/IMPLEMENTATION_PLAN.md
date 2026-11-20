@@ -1,6 +1,6 @@
 # Plano de implementação
 
-> **Estado:** fases 1, 2 e 3 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
+> **Estado:** fases 1, 2, 3 e 4 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
 > A execução deve seguir as fases do [`AGENTS.md`](../AGENTS.md) §18, uma por vez, com validação e atualização de documentação ao final de cada uma.
 
 ## 0. Versões e ambiente verificados (19/11/2026)
@@ -32,7 +32,8 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | 1 — Fundação | Concluída em 19/11/2026 |
 | 2 — Modelo cartográfico | Concluída em 19/11/2026 |
 | 3 — Descoberta | Concluída em 20/11/2026 |
-| 4 a 10 | Não iniciadas |
+| 4 — Persistência | Concluída em 20/11/2026 |
+| 5 a 10 | Não iniciadas |
 
 ## 2. Fases
 
@@ -100,13 +101,15 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 
 ### Fase 4 — Persistência
 
-**Tarefas:** serialização de região v1; isolamento por mundo/dimensão; dirty tracking; fila assíncrona limitada e deduplicada; escrita atômica com backup; quarentena de arquivo corrompido; cadeia de migração; flush em desconexão, troca de mundo e shutdown.
+**Status: concluída.**
+
+**Tarefas:** serialização de região v1; isolamento por mundo/dimensão; dirty tracking; fila assíncrona limitada e deduplicada; escrita atômica com backup; quarentena de arquivo corrompido; recuperação de escrita interrompida; flush em desconexão, troca de mundo e shutdown.
 
 **Critérios de aceite:** dados sobrevivem a reinício; mundos nunca compartilham dados; arquivo corrompido não derruba o jogo; nenhum I/O na render thread.
 
-**Validação:** ciclos salvar/reabrir, troca de mundos, interrupção forçada de escrita, arquivo corrompido propositalmente.
+**Validação executada:** 28 testes JUnit 5 passando (incluindo round-trip `CartographicMap` → `RegionData` → codec → `MapStorage` → novo `CartographicMap`, corrupção, recuperação via `.tmp`, isolamento entre worlds e versão futura rejeitada). `./gradlew build`, `./gradlew runData` e `./gradlew runClient` curto passaram; o JAR contém `lz4-java-1.8.0.jar` em `META-INF/jarjar/`. A validação em jogo real (entrar em mundo, explorar, sair e reabrir) não foi feita neste ambiente por falta de interface gráfica interativa; os ciclos foram cobertos por testes de integração do storage.
 
-**Riscos:** estabilidade da hash de identidade entre sessões; compressão escolhida; atomic move em diferentes filesystems.
+**Riscos:** a cadeia de migração não existe porque ainda só existe o schema v1; versão futura falha de forma controlada. A identidade depende do modo de config e mudá-lo cria outro diretório (sem migração), conforme documentado.
 
 ---
 
@@ -196,7 +199,7 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 |---|---|
 | Testes | JUnit 5 (`junit-bom` 5.11.4) com `useJUnitPlatform()`; classpath de teste estende o classpath de main para enxergar Minecraft/NeoForge |
 | Identidade de mundo | configurável via `storage.world_identity_mode`; padrão `NAME_AND_HASH` = nome/pasta sanitizado + hash SHA-256 truncado (12 hex) de identidade normalizada; alternativas `HASH_ONLY` e `NAME_ONLY`. Endereço do servidor e seed nunca são gravados em claro |
-| Armazenamento (Fase 4) | diretório `.minecraft/czminimap` com compressão LZ4; o formato versionado será definido para esse destino |
+| Armazenamento (Fase 4) | diretório `<gameDir>/czminimap` com compressão LZ4 (jarJar), um arquivo por região 512×512 |
 
 ### Adotadas na Fase 3
 
@@ -209,11 +212,23 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | Aparência de ar | `KNOWN_AIR`/`UNDERGROUND_SPACE` não entram na paleta (`appearance = null`) |
 | Dono do estado | `MapManager` troca o `CartographicMap` ao mudar de mundo; dimensão faz parte da chave de região |
 
+### Adotadas na Fase 4
+
+| Decisão | Valor adotado |
+|---|---|
+| Local dos dados | `<gameDir>/czminimap/<storageId>/dimensions/<namespace>/<path>/regions/r.<x>.<z>.bin` |
+| Formato | `CZM1`: magic + schemaVersion + identidade + limites + coordenadas + tamanhos + CRC32; payload LZ4 com paleta, chunks, seções e `lastObservedTick` |
+| Compressão | LZ4 (`org.lz4:lz4-java:1.8.0`), declarado e embutido via `jarJar` |
+| Granularidade | um arquivo por região 512×512, alinhado ao dirty tracking existente |
+| Carga | worker lê todos os arquivos do mundo e publica um batch com token; descoberta fica pausada até o game thread aplicar o batch |
+| Escrita | `.tmp` → `.bak` → `ATOMIC_MOVE` com fallback; corrompido vai para `.corrupt`; `.tmp`/`.bak` válidos recuperam o principal |
+| Mesclagem | por seção, usando `lastObservedTick`; relógio monotônico entre sessões evita dados antigos vencerem descobertas novas |
+
 ### A confirmar nas próximas fases
 
-1. **Formato de região v1** (Fase 4): campos exatos do cabeçalho, tamanho de chunk de região no arquivo e esquema de migração.
-2. **Estratégia de cache** (Fases 5/6): limites de memória e chaves de invalidação por `(region, version, modo)`.
-3. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
+1. **Estratégia de cache** (Fases 5/6): limites de memória e chaves de invalidação por `(region, version, modo)`.
+2. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
+3. **Migração de schema**: definir a cadeia quando surgir um formato v2; hoje versão diferente de 1 falha de forma controlada.
 
 ## 4. Comandos de validação (após a Fase 1)
 

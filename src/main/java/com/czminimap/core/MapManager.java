@@ -30,4 +30,10 @@ public final class MapManager {
         map = new CartographicMap();
         return true;
     }
+
+    /** Drops the active world and its in-memory data after a flush; the next tick reloads from storage. */
+    public void reset() {
+        activeWorld = null;
+        map = new CartographicMap();
+    }
 }
