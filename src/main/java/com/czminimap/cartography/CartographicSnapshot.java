@@ -27,6 +27,12 @@ public final class CartographicSnapshot {
         return new CartographicSnapshot(version, regions, surfaceColumns);
     }
 
+    /** Callback for immutable voxel reads. Never receives live world objects. */
+    @FunctionalInterface
+    public interface VoxelConsumer {
+        void accept(int x, int y, int z, DiscoveryState state, VoxelAppearance appearance);
+    }
+
     /** Immutable identity of one horizontal column, derived from the active world and dimension. */
     public record SurfaceColumnKey(WorldKey world, DimensionKey dimension, int x, int z) {
         public SurfaceColumnKey {
@@ -70,6 +76,36 @@ public final class CartographicSnapshot {
     /** Returns the topmost discovered surface of a column, or {@code null} when none is known. */
     public SurfaceColumn surfaceAt(WorldKey world, DimensionKey dimension, int x, int z) {
         return surfaceColumns.get(new SurfaceColumnKey(world, dimension, x, z));
+    }
+
+    /** Visits every discovered solid voxel of one region. Cheap enough for mesh generation. */
+    public void forEachSolid(WorldKey world, DimensionKey dimension, RegionKey region, VoxelConsumer consumer) {
+        RegionView view = regions.get(region);
+        if (view == null) {
+            return;
+        }
+        for (Map.Entry<Long, ChunkView> chunkEntry : view.chunks.entrySet()) {
+            int chunkX = (int) (long) chunkEntry.getKey();
+            int chunkZ = (int) (((long) chunkEntry.getKey()) >>> 32);
+            for (Map.Entry<Integer, SectionView> sectionEntry : chunkEntry.getValue().sections.entrySet()) {
+                int sectionY = sectionEntry.getKey();
+                SectionView section = sectionEntry.getValue();
+                for (int index = 0; index < RegionData.SectionData.VOXELS; index++) {
+                    DiscoveryState state = section.state(index);
+                    if (state != DiscoveryState.SOLID && state != DiscoveryState.EXPOSED_SURFACE) {
+                        continue;
+                    }
+                    int x = chunkX * 16 + (index & 15);
+                    int z = chunkZ * 16 + ((index >> 4) & 15);
+                    int y = sectionY * 16 + ((index >> 8) & 15);
+                    int paletteIndex = section.paletteIndex(index);
+                    VoxelAppearance appearance = paletteIndex >= 0 && paletteIndex < view.palette.size()
+                            ? view.palette.get(paletteIndex)
+                            : null;
+                    consumer.accept(x, y, z, state, appearance);
+                }
+            }
+        }
     }
 
     private RegionView regionAt(WorldKey world, DimensionKey dimension, int x, int z) {
@@ -127,14 +163,22 @@ public final class CartographicSnapshot {
         }
 
         DiscoveryState state(int x, int y, int z) {
-            byte encoded = states[CartographicSnapshot.localIndex(x, y, z)];
+            return state(CartographicSnapshot.localIndex(x, y, z));
+        }
+
+        DiscoveryState state(int index) {
+            byte encoded = states[index];
             return encoded < 0 || encoded >= DiscoveryState.values().length
                     ? DiscoveryState.UNKNOWN
                     : DiscoveryState.values()[encoded];
         }
 
         int paletteIndex(int x, int y, int z) {
-            return paletteIndices[CartographicSnapshot.localIndex(x, y, z)];
+            return paletteIndex(CartographicSnapshot.localIndex(x, y, z));
+        }
+
+        int paletteIndex(int index) {
+            return paletteIndices[index];
         }
     }
 }

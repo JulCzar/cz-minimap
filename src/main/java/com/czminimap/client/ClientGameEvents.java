@@ -1,6 +1,7 @@
 package com.czminimap.client;
 
 import com.czminimap.CzMinimap;
+import com.czminimap.gui.WorldMapScreen;
 import com.czminimap.input.KeyBindings;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -21,8 +22,20 @@ public final class ClientGameEvents {
 
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
+        Minecraft minecraft = Minecraft.getInstance();
         while (KeyBindings.OPEN_MAP.consumeClick()) {
-            UI_STATE.toggleMap();
+            if (minecraft.level == null || minecraft.player == null) {
+                continue;
+            }
+            if (UI_STATE.isMapOpen()) {
+                UI_STATE.setMapOpen(false);
+                if (minecraft.screen instanceof WorldMapScreen) {
+                    minecraft.setScreen(null);
+                }
+            } else {
+                UI_STATE.setMapOpen(true);
+                minecraft.setScreen(new WorldMapScreen(ClientMapContext.get().worldMapRenderer()));
+            }
         }
         while (KeyBindings.TOGGLE_MINIMAP.consumeClick()) {
             UI_STATE.toggleMinimap();
@@ -46,8 +59,11 @@ public final class ClientGameEvents {
             UI_STATE.changeLayer(-1);
         }
         ClientMapContext context = ClientMapContext.get();
-        context.onClientTick(Minecraft.getInstance());
-        context.minimapRenderer().tick(Minecraft.getInstance());
+        context.onClientTick(minecraft);
+        context.minimapRenderer().tick(minecraft);
+        if (UI_STATE.isMapOpen()) {
+            context.worldMapRenderer().tick(minecraft);
+        }
     }
 
     @SubscribeEvent
@@ -57,6 +73,7 @@ public final class ClientGameEvents {
 
     @SubscribeEvent
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        UI_STATE.setMapOpen(false);
         ClientMapContext.get().onDisconnect();
     }
 

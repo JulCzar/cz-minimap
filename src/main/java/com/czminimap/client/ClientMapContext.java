@@ -11,6 +11,7 @@ import com.czminimap.core.WorldKey;
 import com.czminimap.discovery.DiscoveryEngine;
 import com.czminimap.discovery.DiscoverySettings;
 import com.czminimap.rendering.minimap.MinimapRenderer;
+import com.czminimap.rendering.worldmap.WorldMapRenderer;
 import com.czminimap.storage.MapStorage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -28,6 +29,7 @@ public final class ClientMapContext {
     private final MapManager mapManager = new MapManager();
     private final DiscoveryEngine discoveryEngine = new DiscoveryEngine(mapManager);
     private final MinimapRenderer minimapRenderer = new MinimapRenderer();
+    private final WorldMapRenderer worldMapRenderer = new WorldMapRenderer();
     private final Set<RegionKey> pendingDirty = new HashSet<>();
 
     private MapStorage storage;
@@ -55,6 +57,10 @@ public final class ClientMapContext {
         return minimapRenderer;
     }
 
+    public WorldMapRenderer worldMapRenderer() {
+        return worldMapRenderer;
+    }
+
     public void onClientTick(Minecraft minecraft) {
         ClientLevel level = minecraft.level;
         Player player = minecraft.player;
@@ -74,6 +80,7 @@ public final class ClientMapContext {
             mapManager.selectWorld(world);
             discoveryEngine.reset();
             minimapRenderer.invalidate();
+            worldMapRenderer.invalidate();
             pendingDirty.clear();
             lastFlushMillis = System.currentTimeMillis();
             if (mapStorage != null) {
@@ -152,6 +159,7 @@ public final class ClientMapContext {
         mapManager.reset();
         discoveryEngine.reset();
         minimapRenderer.invalidate();
+        worldMapRenderer.invalidate();
         pendingDirty.clear();
         loadPending = false;
         pendingLoadToken = 0L;
@@ -159,6 +167,7 @@ public final class ClientMapContext {
 
     public void onShutdown() {
         minimapRenderer.close();
+        worldMapRenderer.invalidate();
         if (storage == null) {
             return;
         }

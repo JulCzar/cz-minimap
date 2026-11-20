@@ -1,6 +1,6 @@
 # Plano de implementação
 
-> **Estado:** fases 1, 2, 3, 4 e 5 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
+> **Estado:** fases 1, 2, 3, 4, 5 e 6 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
 > A execução deve seguir as fases do [`AGENTS.md`](../AGENTS.md) §18, uma por vez, com validação e atualização de documentação ao final de cada uma.
 
 ## 0. Versões e ambiente verificados (19/11/2026)
@@ -34,7 +34,8 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | 3 — Descoberta | Concluída em 20/11/2026 |
 | 4 — Persistência | Concluída em 20/11/2026 |
 | 5 — Minimap 2D | Concluída em 20/11/2026 |
-| 6 a 10 | Não iniciadas |
+| 6 — Renderizador 3D inicial | Concluída em 20/11/2026 |
+| 7 a 10 | Não iniciadas |
 
 ## 2. Fases
 
@@ -138,13 +139,26 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 
 ### Fase 6 — Renderizador 3D inicial
 
-**Tarefas:** câmera orbital independente; malhas por região com remoção de faces ocultas; `MaterialResolver` com UV do atlas e tint de biome; tratamento de transparência e fallback; invalidação em resource reload; tela com controles de navegação (zoom, reset, retorno ao jogador).
+**Status: concluída.**
 
-**Critérios de aceite:** modelo voxel rotacionável com texturas reconhecíveis; nenhum objeto de render por bloco; malhas reconstruídas por região, não globalmente.
+**Tarefas:** câmera orbital independente; `CartographicSnapshot.forEachSolid` para leitura imutável de voxels; malhas por chunk com remoção de faces ocultas (incluindo fronteira entre chunks); cor por face via `MinimapColorResolver` com sombreamento fixo; cache LRU de malhas por versão do snapshot com orçamento de reconstrução por tick; `RenderType` próprio com `POSITION_COLOR`/QUADS; marcador do jogador; tela cheia com rotação/pan/zoom, reset, retorno ao jogador e painel mínimo; configuração `worldmap` e traduções.
 
-**Validação:** rotação/pan/zoom, inspeção visual de terreno e cavernas, resource reload, perfil de FPS.
+**Decisões adotadas**
 
-**Riscos:** API de renderização customizada em 1.21.1; ciclo de vida de texturas GPU; transparência.
+- Aparência do mapa 3D é **apenas cor por face** (`WorldMapMaterialResolver`), decidida explicitamente com o usuário. Não há atlas, `BlockState` vivo, tint dinâmico nem texturas nesta fase; `MinimapColorResolver` continua sendo a única origem de cor tanto no HUD quanto no 3D.
+- Escopo de UI é **câmera + painel mínimo**, decidido com o usuário. Sem camadas, cutaway ou seletor de intervalo (Fase 7).
+- Geometria é por **chunk**, não por região: o custo de reconstrução é menor e o raio de retenção é configurável. A vizinhança 3×3 de chunks é amostrada só para culling de faces na borda.
+- `UNKNOWN`, `KNOWN_AIR` e `UNDERGROUND_SPACE` não viram geometria. Face só é removida quando o vizinho é `SOLID`/`EXPOSED_SURFACE` conhecido — o renderizador nunca infere terreno a partir de dados ausentes.
+- `RenderType.create("czminimap_terrain", POSITION_COLOR, QUADS, ...)` com `NO_CULL` e `LEQUAL_DEPTH_TEST`, usando `GameRenderer::getPositionColorShader`. Nenhum recurso GPU persistente é criado: os quads vão pelo `BufferSource` do `GuiGraphics`.
+- `Screen.render` roda com translação GUI na pilha model-view (~+9990 Z), então `WorldMapRenderer.render` aplica `identity()` após o push antes de multiplicar pela matriz da câmera, e restaura projeção/model-view ao final.
+- `WorldMapRenderer.tick` só avança a versão/base de cache quando **todos** os chunks do raio foram reconstruídos; se `mesh_budget` não cobre a demanda, o trabalho continua no tick seguinte.
+- `M` abre/fecha a tela; `mapOpen` esconde o HUD; `ESC` chama `onClose` e sincroniza `ClientUiState.setMapOpen(false)`.
+
+**Critérios de aceite:** modelo voxel rotacionável via câmera independente, nenhum objeto de render por bloco, malhas invalidadas por versão do snapshot e sem fonte de dados própria. Texturas reconhecíveis, LOD, cutaway e camadas ficaram explicitamente fora desta passada e são critérios das Fases 7–8.
+
+**Validação executada:** 61 testes JUnit 5 passando (22 novos: câmera/transformações, culling de faces e fronteira de chunk, cor por face, cache LRU/versão/raio e `forEachSolid`). `./gradlew clean build`, `./gradlew test`, `./gradlew runData` e `./gradlew runClient` passaram; o cliente entrou como `Dev` em `(-79.97, 73.0, 61.28)` sem exceções do mod. A abertura da tela e a inspeção visual de terreno/cavernas não puderam ser automatizadas neste ambiente (sem dispositivo de entrada/screenshot funcional); a validação visual interativa permanece como limite conhecido.
+
+**Riscos:** api de renderização customizada em 1.21.1 foi confirmada por `javap` nas fontes do NeoForge 21.1.267, mas o caminho de desenho da tela não foi exercido por input automatizado. A geração de malha roda na game thread com orçamento; perfis em área extensa ainda não foram medidos. Texturas, transparência e resource reload ficam para a fase de material completo.
 
 ---
 
@@ -247,9 +261,22 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | Cor | resolutor determinístico por `block id` e `biome id`; `UNKNOWN` = `0xFF181818` |
 | Config adicional | `background_opacity`, `custom_x`, `custom_y`, `show_compass`, `show_coordinates` |
 
+### Adotadas na Fase 6
+
+| Decisão | Valor adotado |
+|---|---|
+| Aparência 3D | apenas cores por face via `MinimapColorResolver` + sombreamento fixo por direção; sem atlas ou texturas (decisão do usuário) |
+| UI | câmera orbital + painel mínimo (decisão do usuário); sem camadas/cutaway nesta fase |
+| Unidade de malha | chunk, com culling de faces usando vizinhança 3×3 de chunks |
+| `RenderType` | `czminimap_terrain`, `POSITION_COLOR`/QUADS, `NO_CULL`, `LEQUAL_DEPTH_TEST`, shader `getPositionColorShader` |
+| Matriz de tela | `identity()` na pilha model-view antes de aplicar a view; projeção e pilha restauradas após o desenho |
+| Cache de malhas | LRU por chunk + versão do snapshot; `max_cached_chunks` e `mesh_budget` configuráveis; `retainRadius` por `render_radius` |
+| Orçamento | versão/base de cache só avança quando todos os chunks do raio são reconstruídos |
+| Config adicional | `worldmap.fov`, `render_radius`, `sensitivity`, `max_cached_chunks`, `mesh_budget`, `background_opacity` |
+
 ### A confirmar nas próximas fases
 
-1. **Estratégia de cache** (Fase 6 em diante): limites de memória e chaves de invalidação por `(region, version, modo/camada/LOD)` para malhas e LOD; o HUD já usa versão + parâmetros de visualização.
+1. **Estratégia de cache** (Fases 7–8): o HUD usa versão + parâmetros e o 3D usa versão + chunk + raio; falta estender as chaves com `(modo/camada/LOD)` e adicionar orçamento de memória quando LOD existir.
 2. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
 3. **Migração de schema**: definir a cadeia quando surgir um formato v2; hoje versão diferente de 1 falha de forma controlada.
 

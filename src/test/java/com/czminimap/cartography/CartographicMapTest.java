@@ -131,6 +131,41 @@ class CartographicMapTest {
     }
 
     @Test
+    void forEachSolidVisitsOnlyDiscoveredSolidVoxels() {
+        CartographicMap map = new CartographicMap();
+        map.setVoxel(WORLD, OVERWORLD, 0, 64, 0, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 1, 64, 0, DiscoveryState.KNOWN_AIR, null, 2L);
+        map.setVoxel(WORLD, OVERWORLD, 2, 64, 0, DiscoveryState.EXPOSED_SURFACE, STONE, 3L);
+        map.setVoxel(WORLD, OVERWORLD, 3, 64, 0, DiscoveryState.UNDERGROUND_SPACE, null, 4L);
+        map.setVoxel(WORLD, OVERWORLD, -1, 64, 0, DiscoveryState.SOLID, STONE, 5L);
+        CartographicSnapshot snapshot = map.snapshot();
+
+        RegionKey region = new RegionKey(WORLD, OVERWORLD, 0, 0);
+        int[] count = {0};
+        snapshot.forEachSolid(WORLD, OVERWORLD, region, (x, y, z, state, appearance) -> {
+            count[0]++;
+            assertEquals(64, y);
+            assertEquals(0, z);
+            assertEquals(STONE, appearance);
+            assertTrue(state == DiscoveryState.SOLID || state == DiscoveryState.EXPOSED_SURFACE);
+            assertTrue(x == 0 || x == 2);
+        });
+        assertEquals(2, count[0]);
+    }
+
+    @Test
+    void forEachSolidIgnoresUnknownRegion() {
+        CartographicMap map = new CartographicMap();
+        CartographicSnapshot snapshot = map.snapshot();
+        RegionKey region = new RegionKey(WORLD, OVERWORLD, 0, 0);
+
+        int[] count = {0};
+        snapshot.forEachSolid(WORLD, OVERWORLD, region, (x, y, z, state, appearance) -> count[0]++);
+
+        assertEquals(0, count[0]);
+    }
+
+    @Test
     void surfaceIndexIsRebuiltFromPersistedData() {
         CartographicMap source = new CartographicMap();
         source.setVoxel(WORLD, OVERWORLD, 5, 70, 6, DiscoveryState.EXPOSED_SURFACE, STONE, 11L);

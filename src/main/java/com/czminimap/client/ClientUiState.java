@@ -24,6 +24,10 @@ public final class ClientUiState {
         mapOpen = !mapOpen;
     }
 
+    public void setMapOpen(boolean open) {
+        mapOpen = open;
+    }
+
     public int getMinimapZoomSteps() {
         return minimapZoomSteps;
     }

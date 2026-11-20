@@ -7,5 +7,6 @@
   "key.czminimap.camera_reset": "Redefinir câmera 3D",
   "key.czminimap.return_to_player": "Retornar câmera 3D ao jogador",
   "key.czminimap.layer_next": "Próxima camada vertical",
-  "key.czminimap.layer_previous": "Camada vertical anterior"
+  "key.czminimap.layer_previous": "Camada vertical anterior",
+  "gui.czminimap.world_map": "CZ Minimap - Mapa 3D"
 }

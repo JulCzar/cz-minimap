@@ -24,6 +24,13 @@ public final class ClientConfig {
     public final ModConfigSpec.BooleanValue showCompass;
     public final ModConfigSpec.BooleanValue showCoordinates;
 
+    public final ModConfigSpec.DoubleValue worldMapFov;
+    public final ModConfigSpec.IntValue worldMapRenderRadius;
+    public final ModConfigSpec.DoubleValue worldMapSensitivity;
+    public final ModConfigSpec.IntValue worldMapMaxCachedChunks;
+    public final ModConfigSpec.IntValue worldMapMeshBudget;
+    public final ModConfigSpec.IntValue worldMapBackgroundOpacity;
+
     private ClientConfig(ModConfigSpec.Builder builder) {
         builder.push("hud");
         enabled = builder.comment("Show the HUD minimap.").define("enabled", true);
@@ -49,6 +56,21 @@ public final class ClientConfig {
                 .define("show_compass", true);
         showCoordinates = builder.comment("Draw the player's block coordinates below the minimap.")
                 .define("show_coordinates", true);
+        builder.pop();
+
+        builder.push("worldmap");
+        worldMapFov = builder.comment("3D map camera field of view in degrees.")
+                .defineInRange("fov", 70.0, 30.0, 120.0);
+        worldMapRenderRadius = builder.comment("Number of chunks around the camera target included in the 3D map.")
+                .defineInRange("render_radius", 3, 1, 8);
+        worldMapSensitivity = builder.comment("Mouse sensitivity multiplier for camera rotation, pan and zoom.")
+                .defineInRange("sensitivity", 1.0, 0.2, 3.0);
+        worldMapMaxCachedChunks = builder.comment("Maximum number of cached chunk meshes.")
+                .defineInRange("max_cached_chunks", 512, 32, 4096);
+        worldMapMeshBudget = builder.comment("Maximum chunk meshes rebuilt per client tick.")
+                .defineInRange("mesh_budget", 8, 1, 64);
+        worldMapBackgroundOpacity = builder.comment("3D map background opacity percentage.")
+                .defineInRange("background_opacity", 92, 0, 100);
         builder.pop();
     }
 
