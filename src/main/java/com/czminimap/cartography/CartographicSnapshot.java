@@ -13,14 +13,30 @@ import java.util.Set;
 public final class CartographicSnapshot {
     private final long version;
     private final Map<RegionKey, RegionView> regions;
+    private final Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns;
 
-    private CartographicSnapshot(long version, Map<RegionKey, RegionView> regions) {
+    private CartographicSnapshot(long version, Map<RegionKey, RegionView> regions,
+                                 Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns) {
         this.version = version;
         this.regions = Map.copyOf(regions);
+        this.surfaceColumns = Map.copyOf(surfaceColumns);
     }
 
-    static CartographicSnapshot of(long version, Map<RegionKey, RegionView> regions) {
-        return new CartographicSnapshot(version, regions);
+    static CartographicSnapshot of(long version, Map<RegionKey, RegionView> regions,
+                                   Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns) {
+        return new CartographicSnapshot(version, regions, surfaceColumns);
+    }
+
+    /** Immutable identity of one horizontal column, derived from the active world and dimension. */
+    public record SurfaceColumnKey(WorldKey world, DimensionKey dimension, int x, int z) {
+        public SurfaceColumnKey {
+            java.util.Objects.requireNonNull(world, "world");
+            java.util.Objects.requireNonNull(dimension, "dimension");
+        }
+    }
+
+    /** Highest discovered solid surface of a column; never inferred from neighbouring columns. */
+    public record SurfaceColumn(int y, DiscoveryState state, VoxelAppearance appearance) {
     }
 
     public long version() {
@@ -49,6 +65,11 @@ public final class CartographicSnapshot {
     public long lastObservedTickAt(WorldKey world, DimensionKey dimension, int x, int y, int z) {
         SectionView section = sectionAt(world, dimension, x, y, z);
         return section == null ? Long.MIN_VALUE : section.lastObservedTick;
+    }
+
+    /** Returns the topmost discovered surface of a column, or {@code null} when none is known. */
+    public SurfaceColumn surfaceAt(WorldKey world, DimensionKey dimension, int x, int z) {
+        return surfaceColumns.get(new SurfaceColumnKey(world, dimension, x, z));
     }
 
     private RegionView regionAt(WorldKey world, DimensionKey dimension, int x, int z) {

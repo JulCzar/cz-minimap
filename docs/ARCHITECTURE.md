@@ -1,6 +1,6 @@
 # Arquitetura proposta
 
-> **Estado:** as fases 1 a 4 implementaram `core`, `cartography`, `world`, `discovery`, `storage` e a composição cliente. Este documento descreve a implementação real; os demais pacotes da tabela continuam como proposta para fases futuras.
+> **Estado:** as fases 1 a 5 implementaram `core`, `cartography`, `world`, `discovery`, `storage`, composição cliente e o HUD 2D. Este documento descreve a implementação real; os demais pacotes da tabela continuam como proposta para fases futuras.
 > As regras normativas estão em [`AGENTS.md`](../AGENTS.md). Este documento traduz essas regras em fronteiras concretas de código.
 
 ## 1. Princípio central
@@ -54,7 +54,7 @@ Topologia alvo, **criada incrementalmente**. Pacotes e classes só aparecem quan
 | `com.czminimap.layers` | intervalos verticais e modos de visualização | 7 |
 | `com.czminimap.cutaway` | recorte horizontal/vertical e resolução de clip | 7 |
 | `com.czminimap.lod` | níveis, seleção por distância, cache e limites | 8 |
-| `com.czminimap.rendering.minimap` | tiles 2D e desenho no HUD | 5 |
+| `com.czminimap.rendering.minimap` | `MinimapColorResolver`, `MinimapImage`, `MinimapLayout` (puros) e `MinimapRenderer` (GPU) | 5 |
 | `com.czminimap.rendering.worldmap` | câmera orbital, malhas, recursos GPU | 6 |
 | `com.czminimap.gui` | tela do mapa e controles | 6 |
 
@@ -101,7 +101,7 @@ record VoxelAppearance(ResourceLocation block, int propertiesMask,
 
 ### 4.3 Snapshots
 
-`CartographicSnapshot` carrega `version` e um mapa imutável de regiões; os limites de dimensão estão embutidos em cada `DimensionKey` das chaves. Paleta, chunks, seções e arrays são copiados na construção, e a API só expõe leitura. Toda cache de apresentação será chaveada por `(regionKey, version, modo/camada/LOD)`. Quando o modelo muda, a versão incrementa e caches antigas ficam elegíveis para evicção; nada é mutado "in place" por consumidores.
+`CartographicSnapshot` carrega `version`, um mapa imutável de regiões e um **índice derivado de colunas superficiais** (`SurfaceColumnKey -> SurfaceColumn` com `y`, estado e aparência do bloco mais alto descoberto). Esse índice é mantido incrementalmente pelo único ponto de escrita (`CartographicMap.setVoxel`) e reconstruído a partir dos arrays persistidos em `loadRegion`; ele não é salvo nem tratado como fonte independente. Os limites de dimensão estão embutidos em cada `DimensionKey` das chaves. Paleta, chunks, seções, arrays e índice são copiados na construção, e a API só expõe leitura. Toda cache de apresentação é chaveada por versão do snapshot e parâmetros de visualização. Quando o modelo muda, a versão incrementa e caches antigas ficam elegíveis para evicção; nada é mutado "in place" por consumidores.
 
 ## 5. Fluxos de dados
 
@@ -169,13 +169,23 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 - Cutaway filtra na geração/render da malha, preservando `UNKNOWN` e `KNOWN_AIR`; muda apenas dados de apresentação, nunca o modelo.
 - LOD 0..3: blocos texturizados → grupos agregados → cor dominante → silhueta regional. Seleção por distância/tamanho projetado; células com ar conhecido, desconhecido ou mistura relevante caem para LOD mais fino. Cache LRU com orçamento de memória e jobs deduplicados.
 
-## 10. Configuração e input
+## 10. Minimap 2D (Fase 5 — implementada)
+
+- Evento: `RenderGuiEvent.Post` no barramento de eventos de cliente (NeoForge 21.1.267); o desenho é ignorado quando não há jogador/nível, quando uma tela está aberta ou quando o mapa 3D está aberto.
+- `MinimapRenderer.tick` roda na game thread e compara `CartographicMap.version()` com a versão em cache. Só chama `snapshot()` e reconstrói o buffer quando a versão ou os parâmetros (centro, zoom, tamanho, forma, mundo/dimensão) mudam; há throttle mínimo de 100 ms entre reconstruções.
+- `MinimapImage` é um `int[]` ARGB imutável derivado apenas de `CartographicSnapshot.surfaceAt(...)`. Colunas sem superfície descoberta recebem a cor de `UNKNOWN`; ar conhecido e cavidades não são desenhados como terreno. Máscara circular e moldura são aplicadas no próprio buffer, com alfa zero fora do círculo.
+- `MinimapRenderer.render` roda na render thread: converte ARGB → ABGR, escreve em `NativeImage`, chama `DynamicTexture.upload()` e desenha com `GuiGraphics.blit`. Nenhum acesso a mundo, disk ou geração de geometria acontece nesse caminho.
+- Orientação: o buffer é sempre norte-acima. Para `north_up = false`, a pose é rotacionada por `π - yaw` em torno do centro; o indicador do jogador é desenhado fora dessa rotação com `π + yaw` (norte-acima) ou sem rotação (cabeçalho-acima). A bússola é desenhada dentro da pose rotacionada, então acompanha o mapa.
+- Posicionamento: `MinimapLayout.resolve` calcula os oito âncoras em coordenadas GUI-escaladas; `CUSTOM` usa `custom_x`/`custom_y`. Nenhuma posição depende da janela ou da câmera 3D.
+- Recursos GPU: uma única `DynamicTexture` é registrada em `czminimap:hud_minimap`, recriada quando o tamanho muda e liberada em shutdown. Troca de mundo/dimensão invalida apenas o cache de pixels.
+
+## 11. Configuração e input
 
 - Config apenas `ModConfig.Type.CLIENT`, com `ModConfigSpec` e validação de intervalos. Apresentação separada de dados persistentes; mudar config nunca apaga mapa. Arquivos distintos: `czminimap-hud-client.toml` e `czminimap-map-client.toml` (o registro de dois specs CLIENT com o mesmo nome gera conflito no FML).
 - `KeyMapping`s registrados via `RegisterKeyMappingsEvent` no barramento do mod, somente em classe `DIST.CLIENT`; checagem em `ClientTickEvent.Post` com `consumeClick()`. Categoria própria `key.categories.czminimap` e traduções `en_us`/`pt_br`. As classes usam `@EventBusSubscriber(value = Dist.CLIENT)` sem o atributo `bus`, deprecado e removido no NeoForge 1.21.1 — o barramento é inferido pelo tipo de evento.
 - Ações: abrir/fechar mapa, alternar HUD, zoom da HUD, reset de câmera, retornar ao jogador e navegação de camadas. Defaults são provisórios e serão validados contra conflitos na Fase 1.
 
-## 11. Decisões de design e justificativas
+## 12. Decisões de design e justificativas
 
 | Decisão | Justificativa |
 |---|---|
@@ -186,3 +196,6 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 | Entrypoint comum sem imports de cliente | mantém classes de cliente fora do caminho do servidor dedicado |
 | LZ4 embutido via `jarJar` | compressão rápida para regiões esparsas sem exigir instalação separada; alternativa JDK era mais lenta e não justificava a perda de performance |
 | Face culling antes de greedy meshing | corretude e debug primeiro; otimização entra com perfil |
+| Índice superficial derivado no modelo | evita varredura vertical por pixel no HUD sem criar segunda fonte de dados; reconstruível a partir dos arrays persistidos |
+| Buffer ARGB puro + uma `DynamicTexture` | mantém geração de pixels fora da render thread e limita objetos GPU a um, independentemente do tamanho do mapa |
+| Rotação na pose, não nos dados | o cache permanece norte-acima e não precisa ser refeito quando o jogador gira |

@@ -8,6 +8,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.minecraft.client.Minecraft;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RenderGuiEvent;
 import net.neoforged.neoforge.event.GameShuttingDownEvent;
 
 @EventBusSubscriber(modid = CzMinimap.MOD_ID, value = Dist.CLIENT)
@@ -44,7 +45,14 @@ public final class ClientGameEvents {
         while (KeyBindings.LAYER_PREVIOUS.consumeClick()) {
             UI_STATE.changeLayer(-1);
         }
-        ClientMapContext.get().onClientTick(Minecraft.getInstance());
+        ClientMapContext context = ClientMapContext.get();
+        context.onClientTick(Minecraft.getInstance());
+        context.minimapRenderer().tick(Minecraft.getInstance());
+    }
+
+    @SubscribeEvent
+    public static void onRenderGui(RenderGuiEvent.Post event) {
+        ClientMapContext.get().minimapRenderer().render(event.getGuiGraphics(), Minecraft.getInstance());
     }
 
     @SubscribeEvent

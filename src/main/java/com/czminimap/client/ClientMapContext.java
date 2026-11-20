@@ -10,6 +10,7 @@ import com.czminimap.core.RegionKey;
 import com.czminimap.core.WorldKey;
 import com.czminimap.discovery.DiscoveryEngine;
 import com.czminimap.discovery.DiscoverySettings;
+import com.czminimap.rendering.minimap.MinimapRenderer;
 import com.czminimap.storage.MapStorage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -26,6 +27,7 @@ public final class ClientMapContext {
 
     private final MapManager mapManager = new MapManager();
     private final DiscoveryEngine discoveryEngine = new DiscoveryEngine(mapManager);
+    private final MinimapRenderer minimapRenderer = new MinimapRenderer();
     private final Set<RegionKey> pendingDirty = new HashSet<>();
 
     private MapStorage storage;
@@ -49,6 +51,10 @@ public final class ClientMapContext {
         return mapManager;
     }
 
+    public MinimapRenderer minimapRenderer() {
+        return minimapRenderer;
+    }
+
     public void onClientTick(Minecraft minecraft) {
         ClientLevel level = minecraft.level;
         Player player = minecraft.player;
@@ -67,6 +73,7 @@ public final class ClientMapContext {
             }
             mapManager.selectWorld(world);
             discoveryEngine.reset();
+            minimapRenderer.invalidate();
             pendingDirty.clear();
             lastFlushMillis = System.currentTimeMillis();
             if (mapStorage != null) {
@@ -144,12 +151,14 @@ public final class ClientMapContext {
         storage.flush();
         mapManager.reset();
         discoveryEngine.reset();
+        minimapRenderer.invalidate();
         pendingDirty.clear();
         loadPending = false;
         pendingLoadToken = 0L;
     }
 
     public void onShutdown() {
+        minimapRenderer.close();
         if (storage == null) {
             return;
         }

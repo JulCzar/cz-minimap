@@ -1,5 +1,7 @@
 package com.czminimap.cartography;
 
+import com.czminimap.cartography.CartographicSnapshot.SurfaceColumn;
+import com.czminimap.cartography.CartographicSnapshot.SurfaceColumnKey;
 import com.czminimap.core.DimensionKey;
 import com.czminimap.core.RegionKey;
 import com.czminimap.core.WorldKey;
@@ -17,6 +19,7 @@ import java.util.Set;
 public final class CartographicMap {
     private final Map<RegionKey, Region> regions = new HashMap<>();
     private final Set<RegionKey> dirtyRegions = new HashSet<>();
+    private final Map<SurfaceColumnKey, SurfaceColumn> surfaceColumns = new HashMap<>();
     private long version;
     private long clock;
 
@@ -57,6 +60,7 @@ public final class CartographicMap {
             clock = Math.max(clock, lastObservedTick);
             version++;
             dirtyRegions.add(key);
+            updateSurface(world, dimension, x, y, z, state, appearance);
         }
     }
 
@@ -88,6 +92,50 @@ public final class CartographicMap {
         Region region = regions.computeIfAbsent(key, ignored -> new Region());
         if (region.load(data)) {
             version++;
+            rebuildSurface(key, data);
+        }
+    }
+
+    private void updateSurface(WorldKey world, DimensionKey dimension, int x, int y, int z,
+                               DiscoveryState state, VoxelAppearance appearance) {
+        if (state != DiscoveryState.SOLID && state != DiscoveryState.EXPOSED_SURFACE) {
+            return;
+        }
+        SurfaceColumnKey key = new SurfaceColumnKey(world, dimension, x, z);
+        SurfaceColumn current = surfaceColumns.get(key);
+        if (current == null || y > current.y()) {
+            surfaceColumns.put(key, new SurfaceColumn(y, state, appearance));
+        }
+    }
+
+    /** Rebuilds the derived index from persisted voxel arrays; no live world access is involved. */
+    private void rebuildSurface(RegionKey regionKey, RegionData data) {
+        for (Map.Entry<Long, RegionData.ChunkData> chunkEntry : data.chunks().entrySet()) {
+            long chunkKey = chunkEntry.getKey();
+            int chunkX = (int) chunkKey;
+            int chunkZ = (int) (chunkKey >>> 32);
+            for (Map.Entry<Integer, RegionData.SectionData> sectionEntry : chunkEntry.getValue().sections().entrySet()) {
+                int sectionY = sectionEntry.getKey();
+                RegionData.SectionData section = sectionEntry.getValue();
+                byte[] states = section.states();
+                int[] indices = section.paletteIndices();
+                for (int index = 0; index < states.length; index++) {
+                    int ordinal = states[index] & 0xFF;
+                    if (ordinal != DiscoveryState.SOLID.ordinal()
+                            && ordinal != DiscoveryState.EXPOSED_SURFACE.ordinal()) {
+                        continue;
+                    }
+                    int x = chunkX * 16 + (index & 15);
+                    int z = chunkZ * 16 + ((index >> 4) & 15);
+                    int y = sectionY * 16 + (index >> 8);
+                    int paletteIndex = indices[index];
+                    VoxelAppearance appearance = paletteIndex >= 0 && paletteIndex < data.palette().size()
+                            ? data.palette().get(paletteIndex)
+                            : null;
+                    DiscoveryState state = DiscoveryState.values()[ordinal];
+                    updateSurface(regionKey.world(), regionKey.dimension(), x, y, z, state, appearance);
+                }
+            }
         }
     }
 
@@ -98,7 +146,7 @@ public final class CartographicMap {
     public CartographicSnapshot snapshot() {
         Map<RegionKey, CartographicSnapshot.RegionView> view = new LinkedHashMap<>();
         regions.forEach((key, region) -> view.put(key, region.freeze()));
-        return CartographicSnapshot.of(version, view);
+        return CartographicSnapshot.of(version, view, surfaceColumns);
     }
 
     private static final class Region {

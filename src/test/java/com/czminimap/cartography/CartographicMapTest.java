@@ -1,14 +1,19 @@
 package com.czminimap.cartography;
 
 import com.czminimap.core.DimensionKey;
+import com.czminimap.core.RegionKey;
 import com.czminimap.core.WorldKey;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -102,5 +107,56 @@ class CartographicMapTest {
         assertEquals(0L, map.version());
         assertFalse(map.isDirty());
         assertTrue(map.snapshot().regions().isEmpty());
+    }
+
+    @Test
+    void surfaceIndexTracksHighestDiscoveredSurface() {
+        CartographicMap map = new CartographicMap();
+        CartographicSnapshot before = map.snapshot();
+        assertNull(before.surfaceAt(WORLD, OVERWORLD, 3, 4));
+
+        map.setVoxel(WORLD, OVERWORLD, 3, 60, 4, DiscoveryState.SOLID, STONE, 1L);
+        map.setVoxel(WORLD, OVERWORLD, 3, 62, 4, DiscoveryState.EXPOSED_SURFACE, STONE, 2L);
+        map.setVoxel(WORLD, OVERWORLD, 3, 61, 4, DiscoveryState.KNOWN_AIR, null, 3L);
+        map.setVoxel(WORLD, OVERWORLD, 4, 10, 4, DiscoveryState.UNDERGROUND_SPACE, null, 4L);
+
+        CartographicSnapshot after = map.snapshot();
+        CartographicSnapshot.SurfaceColumn column = after.surfaceAt(WORLD, OVERWORLD, 3, 4);
+        assertNotNull(column);
+        assertEquals(62, column.y());
+        assertEquals(DiscoveryState.EXPOSED_SURFACE, column.state());
+        assertEquals(STONE, column.appearance());
+        assertNull(after.surfaceAt(WORLD, OVERWORLD, 4, 4));
+        assertNull(before.surfaceAt(WORLD, OVERWORLD, 3, 4));
+    }
+
+    @Test
+    void surfaceIndexIsRebuiltFromPersistedData() {
+        CartographicMap source = new CartographicMap();
+        source.setVoxel(WORLD, OVERWORLD, 5, 70, 6, DiscoveryState.EXPOSED_SURFACE, STONE, 11L);
+        RegionKey key = new RegionKey(WORLD, OVERWORLD, RegionKey.fromBlock(5), RegionKey.fromBlock(6));
+        RegionData data = source.regionData(key);
+
+        CartographicMap restored = new CartographicMap();
+        restored.loadRegion(key, data);
+        CartographicSnapshot.SurfaceColumn column = restored.snapshot().surfaceAt(WORLD, OVERWORLD, 5, 6);
+        assertNotNull(column);
+        assertEquals(70, column.y());
+        assertEquals(STONE, column.appearance());
+
+        byte[] states = new byte[RegionData.SectionData.VOXELS];
+        int[] palette = new int[RegionData.SectionData.VOXELS];
+        Arrays.fill(palette, -1);
+        int index = ((70 & 15) << 8) | ((6 & 15) << 4) | (5 & 15);
+        states[index] = (byte) DiscoveryState.EXPOSED_SURFACE.ordinal();
+        palette[index] = 0;
+        RegionData crafted = new RegionData(java.util.List.of(STONE), Map.of(
+                CartographicSnapshot.chunkKey(0, 0),
+                new RegionData.ChunkData(Map.of(4, new RegionData.SectionData(states, palette, 12L)))));
+        RegionKey otherWorldKey = new RegionKey(new WorldKey("other_123456789abc", "Other"),
+                OVERWORLD, 0, 0);
+        CartographicMap isolated = new CartographicMap();
+        isolated.loadRegion(otherWorldKey, crafted);
+        assertNull(isolated.snapshot().surfaceAt(WORLD, OVERWORLD, 5, 6));
     }
 }

@@ -1,6 +1,6 @@
 # Plano de implementação
 
-> **Estado:** fases 1, 2, 3 e 4 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
+> **Estado:** fases 1, 2, 3, 4 e 5 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
 > A execução deve seguir as fases do [`AGENTS.md`](../AGENTS.md) §18, uma por vez, com validação e atualização de documentação ao final de cada uma.
 
 ## 0. Versões e ambiente verificados (19/11/2026)
@@ -33,7 +33,8 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | 2 — Modelo cartográfico | Concluída em 19/11/2026 |
 | 3 — Descoberta | Concluída em 20/11/2026 |
 | 4 — Persistência | Concluída em 20/11/2026 |
-| 5 a 10 | Não iniciadas |
+| 5 — Minimap 2D | Concluída em 20/11/2026 |
+| 6 a 10 | Não iniciadas |
 
 ## 2. Fases
 
@@ -115,13 +116,23 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 
 ### Fase 5 — Minimap 2D
 
-**Tarefas:** geração de tiles a partir de snapshots; cache invalidado por versão; desenho via `GuiGraphics` no evento de HUD; posições, tamanho, forma, opacidade, zoom e orientação; indicador do jogador; configuração correspondente.
+**Status: concluída.**
+
+**Tarefas:** índice derivado de superfície no modelo cartográfico; `MinimapColorResolver`, `MinimapImage` e `MinimapLayout` como classes puras; `MinimapRenderer` com `DynamicTexture` única; integração em `ClientTickEvent.Post` e `RenderGuiEvent.Post`; configuração de posição customizada, opacidade do painel, bússola e coordenadas; testes unitários e de integração do índice.
+
+**Decisões adotadas**
+
+- O HUD não faz varredura vertical: `CartographicMap` mantém, por mundo/dimensão/coluna, o bloco sólido mais alto descoberto. O índice é derivado, não persistido e reconstruído em `loadRegion`.
+- O buffer é sempre norte-acima; a rotação para cabeçalho-acima acontece na `PoseStack`, então girar o jogador não invalida o cache de pixels.
+- `MinimapRenderer.tick` (game thread) só chama `snapshot()` quando `map.version()` ou os parâmetros de visualização mudam, com throttle de 100 ms. `render` (render thread) apenas converte ARGB→ABGR, faz upload e desenha.
+- Máscara circular e moldura são escritas no buffer com alfa zero fora do círculo; não há shader ou scissor circular.
+- O HUD some quando uma tela está aberta, quando o HUD é desligado por config/atalho ou quando o mapa 3D é aberto.
 
 **Critérios de aceite:** render contínuo sem scan de mundo; funciona em diferentes escalas de GUI e tamanhos de janela; independente da câmera/cutaway do mapa 3D.
 
-**Validação:** inspeção visual no cliente para cada posição, forma e orientação; perfil de frame time.
+**Validação executada:** 39 testes JUnit 5 passando (incluindo índice superficial derivado, reconstrução a partir de dados persistidos, cores determinísticas, máscara circular, mapeamento de zoom fracionário e oito âncoras de posição). `./gradlew build` e `./gradlew runData` passaram. O cliente foi iniciado para verificação do HUD; a validação visual completa de cada posição/forma/orientação depende de sessão interativa e permanece como limite deste ambiente.
 
-**Riscos:** evento de overlay correto em 1.21.1; custo de upload de textura a cada atualização.
+**Riscos:** o upload da textura reprocessa até 512×512 pixels quando um parâmetro muda; a frequência é limitada pelo throttle e pelo tamanho máximo configurável. A correspondência exata de matizes com o atlas de blocos ainda será refinada na Fase 6, quando existir `MaterialResolver`.
 
 ---
 
@@ -224,9 +235,21 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | Escrita | `.tmp` → `.bak` → `ATOMIC_MOVE` com fallback; corrompido vai para `.corrupt`; `.tmp`/`.bak` válidos recuperam o principal |
 | Mesclagem | por seção, usando `lastObservedTick`; relógio monotônico entre sessões evita dados antigos vencerem descobertas novas |
 
+### Adotadas na Fase 5
+
+| Decisão | Valor adotado |
+|---|---|
+| Evento de HUD | `RenderGuiEvent.Post` (confirmado no NeoForge 21.1.267) |
+| Fonte dos pixels | `CartographicSnapshot.surfaceAt(...)`, nunca `Level`/`ChunkAccess` |
+| Cache | versão do snapshot + centro/zoom/tamanho/forma/mundo/dimensão; throttle de 100 ms |
+| Recurso GPU | uma `DynamicTexture` RGBA registrada como `czminimap:hud_minimap` |
+| Orientação | rotação na `PoseStack`; cache permanece norte-acima |
+| Cor | resolutor determinístico por `block id` e `biome id`; `UNKNOWN` = `0xFF181818` |
+| Config adicional | `background_opacity`, `custom_x`, `custom_y`, `show_compass`, `show_coordinates` |
+
 ### A confirmar nas próximas fases
 
-1. **Estratégia de cache** (Fases 5/6): limites de memória e chaves de invalidação por `(region, version, modo)`.
+1. **Estratégia de cache** (Fase 6 em diante): limites de memória e chaves de invalidação por `(region, version, modo/camada/LOD)` para malhas e LOD; o HUD já usa versão + parâmetros de visualização.
 2. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
 3. **Migração de schema**: definir a cadeia quando surgir um formato v2; hoje versão diferente de 1 falha de forma controlada.
 
