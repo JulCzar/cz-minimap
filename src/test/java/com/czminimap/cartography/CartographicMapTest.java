@@ -84,6 +84,18 @@ class CartographicMapTest {
     }
 
     @Test
+    void pointLookupAvoidsFullSnapshots() {
+        CartographicMap map = new CartographicMap();
+        assertEquals(DiscoveryState.UNKNOWN, map.stateAt(WORLD, OVERWORLD, 0, 0, 0));
+
+        map.setVoxel(WORLD, OVERWORLD, 17, -3, -18, DiscoveryState.EXPOSED_SURFACE, STONE, 4L);
+
+        assertEquals(DiscoveryState.EXPOSED_SURFACE, map.stateAt(WORLD, OVERWORLD, 17, -3, -18));
+        assertEquals(DiscoveryState.UNKNOWN, map.stateAt(WORLD, OVERWORLD, 18, -3, -18));
+        assertEquals(DiscoveryState.UNKNOWN, map.stateAt(WORLD, OVERWORLD, 17, -2, -18));
+    }
+
+    @Test
     void writesUnknownWithoutChangingTheModel() {
         CartographicMap map = new CartographicMap();
         map.setVoxel(WORLD, OVERWORLD, 0, 0, 0, DiscoveryState.UNKNOWN, null, 1L);

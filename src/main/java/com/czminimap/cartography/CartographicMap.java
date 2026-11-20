@@ -44,12 +44,22 @@ public final class CartographicMap {
             return;
         }
 
-        RegionKey key = new RegionKey(world, dimension, RegionKey.fromBlock(x), RegionKey.fromBlock(z));
+        RegionKey key = regionKey(world, dimension, x, z);
         Region region = regions.computeIfAbsent(key, ignored -> new Region());
         if (region.setVoxel(x, y, z, state, appearance, lastObservedTick)) {
             version++;
             dirtyRegions.add(key);
         }
+    }
+
+    /** Read-only point lookup for the discovery producer, which runs on the game thread. */
+    public DiscoveryState stateAt(WorldKey world, DimensionKey dimension, int x, int y, int z) {
+        Region region = regions.get(regionKey(world, dimension, x, z));
+        return region == null ? DiscoveryState.UNKNOWN : region.stateAt(x, y, z);
+    }
+
+    private static RegionKey regionKey(WorldKey world, DimensionKey dimension, int x, int z) {
+        return new RegionKey(world, dimension, RegionKey.fromBlock(x), RegionKey.fromBlock(z));
     }
 
     public CartographicSnapshot snapshot() {
@@ -69,6 +79,11 @@ public final class CartographicMap {
             return chunk.setVoxel(x, y, z, state, palette.indexOf(appearance), tick);
         }
 
+        DiscoveryState stateAt(int x, int y, int z) {
+            Chunk chunk = chunks.get(CartographicSnapshot.chunkKey(Math.floorDiv(x, 16), Math.floorDiv(z, 16)));
+            return chunk == null ? DiscoveryState.UNKNOWN : chunk.stateAt(x, y, z);
+        }
+
         CartographicSnapshot.RegionView freeze() {
             Map<Long, CartographicSnapshot.ChunkView> frozenChunks = new LinkedHashMap<>();
             chunks.forEach((key, chunk) -> frozenChunks.put(key, chunk.freeze()));
@@ -82,6 +97,11 @@ public final class CartographicMap {
         boolean setVoxel(int x, int y, int z, DiscoveryState state, int paletteIndex, long tick) {
             Section section = sections.computeIfAbsent(Math.floorDiv(y, 16), ignored -> new Section());
             return section.setVoxel(x, y, z, state, paletteIndex, tick);
+        }
+
+        DiscoveryState stateAt(int x, int y, int z) {
+            Section section = sections.get(Math.floorDiv(y, 16));
+            return section == null ? DiscoveryState.UNKNOWN : section.stateAt(x, y, z);
         }
 
         CartographicSnapshot.ChunkView freeze() {
@@ -108,6 +128,13 @@ public final class CartographicMap {
             paletteIndices[index] = paletteIndex;
             lastObservedTick = Math.max(lastObservedTick, tick);
             return changed;
+        }
+
+        DiscoveryState stateAt(int x, int y, int z) {
+            byte encoded = states[CartographicSnapshot.localIndex(x, y, z)];
+            return encoded < 0 || encoded >= DiscoveryState.values().length
+                    ? DiscoveryState.UNKNOWN
+                    : DiscoveryState.values()[encoded];
         }
 
         CartographicSnapshot.SectionView freeze() {

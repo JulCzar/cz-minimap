@@ -11,7 +11,7 @@ As regras normativas do projeto (escopo, arquitetura, fases e critérios de acei
 
 ## Estado atual
 
-**Fases 1 e 2 implementadas.** O projeto compila, gera `build/libs/czminimap-0.1.0.jar` e carrega no Minecraft 1.21.1 / NeoForge 21.1.267. A Fase 2 introduziu o modelo cartográfico (identidades, voxels, estados de descoberta, snapshots versionados) com 8 testes JUnit 5. As fases 3 a 10 ainda não foram iniciadas.
+**Fases 1, 2 e 3 implementadas.** O projeto compila, gera `build/libs/czminimap-0.1.0.jar` e carrega no Minecraft 1.21.1 / NeoForge 21.1.267. A Fase 2 introduziu o modelo cartográfico (identidades, voxels, estados de descoberta, snapshots versionados). A Fase 3 acrescentou a descoberta progressiva: leitura apenas de chunks já carregados no cliente, varredura de superfície por heightmap, expansão limitada por ar conectado no subterrâneo e orçamento por tick. A suíte tem 16 testes JUnit 5. As fases 4 a 10 ainda não foram iniciadas; em particular, o mapa ainda não é persistido entre sessões.
 
 Para compilar e testar, use um **JDK 21 completo** (com `javac`) via `./gradlew build` e `./gradlew test`. Neste ambiente o Java 21 do sistema é apenas JRE, então `JAVA_HOME` deve apontar para um JDK 21 instalado.
 

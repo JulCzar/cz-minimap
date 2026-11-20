@@ -1,6 +1,6 @@
 # Plano de implementação
 
-> **Estado:** fases 1 e 2 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
+> **Estado:** fases 1, 2 e 3 concluídas. A execução segue as fases do `AGENTS.md` §18, uma por vez.
 > A execução deve seguir as fases do [`AGENTS.md`](../AGENTS.md) §18, uma por vez, com validação e atualização de documentação ao final de cada uma.
 
 ## 0. Versões e ambiente verificados (19/11/2026)
@@ -31,7 +31,8 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 |---|---|
 | 1 — Fundação | Concluída em 19/11/2026 |
 | 2 — Modelo cartográfico | Concluída em 19/11/2026 |
-| 3 a 10 | Não iniciadas |
+| 3 — Descoberta | Concluída em 20/11/2026 |
+| 4 a 10 | Não iniciadas |
 
 ## 2. Fases
 
@@ -78,13 +79,22 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 
 ### Fase 3 — Descoberta
 
-**Tarefas:** tracking de posição/dimensão do jogador; `WorldDataSnapshot` imutável via collected chunks; descoberta de superfície com amostragem limitada; descoberta subterrânea híbrida (visibilidade + proximidade); parâmetros configuráveis; atualização incremental; preservação do já descoberto.
+**Status: concluída.**
 
-**Critérios de aceite:** revelação progressiva; chunks carregados não revelam terreno desconhecido; cavernas e túneis são descobertos sem revelar blocos sólidos arbitrários; troca de dimensão mantém estado separado.
+**Tarefas:** `MapManager` como dono do mapa da sessão; `ChunkDataCollector` para leitura somente de chunks já carregados (`hasChunk` + `getChunk(..., ChunkStatus.FULL, false)`); `WorldDataSnapshot`/`VoxelSample`/`BlockPositionKey`; `DiscoveryPolicy` pura; `ExplorationTracker` com cursor espiral e fronteira de ar limitada; `DiscoveryEngine` no tick do cliente; integração via `ClientMapContext` em `ClientTickEvent.Post`.
 
-**Validação:** testes manuais em superfície, caverna, túnel estreito e Nether/End; `./gradlew test`.
+**Algoritmo adotado**
 
-**Riscos:** APIs exatas de leitura de chunk em 1.21.1 devem ser confirmadas antes de codar; custo por tick precisa de orçamento e perfil.
+- **Superfície:** para cada coluna do cursor espiral (raio `discovery.surface_radius`), o heightmap `WORLD_SURFACE` fornece o topo; amostra-se o topo e até dois blocos abaixo. O topo vira `EXPOSED_SURFACE`; os inferiores, `SOLID` somente se expostos lateralmente a ar.
+- **Subterrâneo:** a fronteira começa no bloco do jogador e seus 6 vizinhos. Ar é expandido por conectividade de faces, dentro de `discovery.underground_radius` e do intervalo de altura real da dimensão. Ar abaixo do heightmap vira `UNDERGROUND_SPACE`; ar acima vira `KNOWN_AIR` sem expansão. Sólidos encontrados na fronteira viram `SOLID`. Blocos internos de montanha não são revelados.
+- **Orçamento:** `discovery.max_samples_per_tick` é dividido entre ar e superfície enquanto a varredura de superfície não termina. A fila de ar tem teto de 16.384 posições; a varredura se reinicia quando o jogador se move mais de 8 blocos ou muda raio/dimensão/mundo.
+- A troca de mundo substitui o mapa em memória (`MapManager.selectWorld`); a troca de dimensão preserva os dados (a dimensão faz parte de `RegionKey`) e reinicia apenas as filas.
+
+**Critérios de aceite:** revelação progressiva e parcelada; nenhum carregamento forçado de chunk; `UNKNOWN` permanece distinto de `KNOWN_AIR`; cavernas conectadas são reveladas sem expor sólidos arbitrários; dimensões com alturas diferentes são respeitadas.
+
+**Validação executada:** `./gradlew test build` passou com **16 testes JUnit 5** (modelo, identidade, política, cursor espiral, fronteira limitada, chave de posição, dono do mapa e lookup pontual). `./gradlew runData` passou e `./gradlew runClient` alcançou o menu sem erros do mod; os erros de áudio/narrador (`OpenAL`, `libflite.so`) permanecem como limitação do ambiente.
+
+**Riscos e limitações conhecidas:** a varredura espiral recomeça quando o jogador se desloca mais de 8 blocos, então anéis externos só são concluídos quando ele para; ainda não há detecção de mudanças de bloco, persistência nem visualização, logo o estado descoberto existe apenas em memória e não é diretamente observável no jogo. Perfil de frame time em mundo grande não foi medido.
 
 ---
 
@@ -188,11 +198,22 @@ Fontes consultadas: documentação oficial NeoForge 1.21.1 (Getting Started, Ver
 | Identidade de mundo | configurável via `storage.world_identity_mode`; padrão `NAME_AND_HASH` = nome/pasta sanitizado + hash SHA-256 truncado (12 hex) de identidade normalizada; alternativas `HASH_ONLY` e `NAME_ONLY`. Endereço do servidor e seed nunca são gravados em claro |
 | Armazenamento (Fase 4) | diretório `.minecraft/czminimap` com compressão LZ4; o formato versionado será definido para esse destino |
 
+### Adotadas na Fase 3
+
+| Decisão | Valor adotado |
+|---|---|
+| Leitura de mundo | somente chunks já disponíveis no cliente; `getChunk(cx, cz, ChunkStatus.FULL, false)`, nunca carregamento forçado |
+| Superfície | heightmap `WORLD_SURFACE` + exposição do topo e de até dois blocos abaixo; sem raycast |
+| Subterrâneo | ar conectado a partir do jogador + sólidos adjacentes; classificação por altura relativa ao heightmap |
+| Agendamento | cursor espiral determinístico, fronteira BFS limitada, orçamento compartilhado por tick e rebase após 8 blocos |
+| Aparência de ar | `KNOWN_AIR`/`UNDERGROUND_SPACE` não entram na paleta (`appearance = null`) |
+| Dono do estado | `MapManager` troca o `CartographicMap` ao mudar de mundo; dimensão faz parte da chave de região |
+
 ### A confirmar nas próximas fases
 
-1. **Política de descoberta** (Fase 3): limites de amostragem por tick e limiar de visibilidade para superfície/subterrâneo.
-2. **Formato de região v1** (Fase 4): campos exatos do cabeçalho, tamanho de chunk de região no arquivo e esquema de migração.
-3. **Estratégia de cache** (Fases 5/6): limites de memória e chaves de invalidação por `(region, version, modo)`.
+1. **Formato de região v1** (Fase 4): campos exatos do cabeçalho, tamanho de chunk de região no arquivo e esquema de migração.
+2. **Estratégia de cache** (Fases 5/6): limites de memória e chaves de invalidação por `(region, version, modo)`.
+3. **Perfil de descoberta**: medir custo por tick em mundo grande e ajustar `max_samples_per_tick`/raios se necessário.
 
 ## 4. Comandos de validação (após a Fase 1)
 

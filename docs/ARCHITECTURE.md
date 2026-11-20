@@ -1,6 +1,6 @@
 # Arquitetura proposta
 
-> **Estado:** a Fase 2 implementou os pacotes `core` e `cartography`, o resolvedor de identidade em `client` e o modelo descreve agora a implementação real. Os demais pacotes da tabela continuam como proposta para fases futuras.
+> **Estado:** as fases 1 a 3 implementaram `core`, `cartography`, `world`, `discovery` e a composição cliente. Este documento descreve a implementação real; os demais pacotes da tabela continuam como proposta para fases futuras.
 > As regras normativas estão em [`AGENTS.md`](../AGENTS.md). Este documento traduz essas regras em fronteiras concretas de código.
 
 ## 1. Princípio central
@@ -30,7 +30,7 @@ Consequência prática: todo dado de mundo que entra no modelo passa por um úni
 Regras de dependência:
 
 - `cartography` não depende de renderização, GUI, disco, câmera, LOD nem cortes; depende apenas de tipos do JDK e de identificadores do Minecraft.
-- `world` e `discovery` são os **únicos produtores** de mudanças no modelo. Coleta não decide descoberta; descoberta não acessa mundo diretamente — ela consome snapshots imutáveis produzidos pela coleta.
+- `world` e `discovery` são os **únicos produtores** de mudanças no modelo. As leituras de mundo vivo acontecem apenas na game thread: `ChunkDataCollector` acessa chunks já carregados e produz `VoxelSample`s imutáveis; `DiscoveryEngine` agrega essas observações em `WorldDataSnapshot` e as entrega à `DiscoveryPolicy`, que é pura e não conhece Minecraft. Nenhum snapshot carrega referência viva de `Level`, `ChunkAccess` ou `BlockState`.
 - `storage` serializa o modelo, mas a renderização nunca lê arquivos nem o estado mutável do storage.
 - `terrain`, `layers`, `cutaway` e `lod` derivam dados; suas caches são chaveadas por versão do snapshot e descartadas quando a versão muda.
 - `rendering` e `gui` nunca acessam `Level`/`ChunkAccess`, nem fazem I/O, nem geram malhas.
@@ -42,13 +42,13 @@ Topologia alvo, **criada incrementalmente**. Pacotes e classes só aparecem quan
 | Pacote | Responsabilidade | Fase |
 |---|---|---:|
 | `com.czminimap` | entrypoint comum (`MOD_ID`, constantes); nenhuma referência a classes de cliente | 1 |
-| `com.czminimap.client` | entrypoint e eventos `DIST.CLIENT` | 1 |
+| `com.czminimap.client` | eventos `DIST.CLIENT`, resolvedor de identidade e `ClientMapContext` (composition root) | 1/3 |
 | `com.czminimap.config` | `ModConfigSpec` de apresentação, descoberta e performance | 1 |
 | `com.czminimap.input` | `KeyMapping`s e ações de teclado | 1 |
-| `com.czminimap.core` | `MapManager`, `MapContext`, identidade de mundo/dimensão; orquestra sessões | 2 |
+| `com.czminimap.core` | `MapManager` (implementado), identidade de mundo/dimensão; `MapContext` permanece proposto | 2/3 |
 | `com.czminimap.cartography` | modelo persistente: regiões, seções, voxels, estados, snapshots | 2 |
-| `com.czminimap.world` | coleta de chunks já disponíveis no cliente e snapshots imutáveis | 3 |
-| `com.czminimap.discovery` | políticas de superfície, subterrâneo, visibilidade e proximidade | 3 |
+| `com.czminimap.world` | `ChunkDataCollector`, `VoxelSample`, `WorldDataSnapshot`, `BlockPositionKey` | 3 |
+| `com.czminimap.discovery` | `DiscoveryPolicy`, `ExplorationTracker`, `DiscoveryEngine`, `DiscoverySettings`, `DiscoveryResult` | 3 |
 | `com.czminimap.storage` | formato de região, escrita atômica, fila assíncrona, migração | 4 |
 | `com.czminimap.terrain` | resolução de material, geração de malha, agregação por região | 6 |
 | `com.czminimap.layers` | intervalos verticais e modos de visualização | 7 |
@@ -108,14 +108,18 @@ record VoxelAppearance(ResourceLocation block, int propertiesMask,
 ### Escrita (game thread)
 
 ```text
-evento do cliente (tick/chunk/block update)
-  -> ChunkDataCollector produz WorldDataSnapshot imutável (sem refs vivas)
-  -> DiscoveryPolicy avalia superfície / subterrâneo com orçamento limitado
-  -> DiscoveryResult aplicado ao CartographicMap
+ClientTickEvent.Post (game thread)
+  -> ClientMapContext resolve WorldKey/DimensionKey e limites de config
+  -> DiscoveryEngine: MapManager seleciona mundo; ExplorationTracker fornece posições
+  -> ChunkDataCollector lê chunks já carregados -> VoxelSample imutáveis
+  -> WorldDataSnapshot -> DiscoveryPolicy -> DiscoveryResult
+  -> CartographicMap.setVoxel (único ponto de escrita)
   -> regiões afetadas marcadas como dirty
-  -> storage recebe job assíncrono deduplicado
-  -> versão do snapshot incrementa -> invalida caches de apresentação
+  -> [Fase 4] storage recebe job assíncrono deduplicado
+  -> versão incrementada -> [Fases 5/6] invalida caches de apresentação
 ```
+
+Mudanças de bloco recebidas pelo cliente ainda não alimentam esse fluxo (Fase 9).
 
 ### Leitura (render)
 
@@ -138,7 +142,9 @@ A HUD e o mapa 3D consomem o mesmo snapshot; nenhum dos dois escaneia o mundo.
 
 Fila com limites e deduplicação por chave de região. Cada job carrega um `generationToken`; resultados de gerações obsoletas são descartados. Prioridade: regiões visíveis no mapa 3D → próximas ao jogador → visíveis na HUD → demais.
 
-## 7. Persistência proposta
+## 7. Persistência proposta (Fase 4 — não implementada)
+
+> Caminho e codec abaixo são propostas em conflito com o plano (`.minecraft/czminimap` + LZ4); serão unificados ao implementar a Fase 4.
 
 - Local: `config/czminimap/data/<worldHash>/dimensions/<namespace>/<path>/regions/r.<x>.<z>.bin` (nomes de dimensão escapados para filesystem).
 - Arquivo de região: cabeçalho com magic `CZM1`, versão de schema, hash de mundo, `DimensionKey`, coordenadas, flags, tamanho e checksum; payload com índice de seções + paleta + bitsets + metadados.
@@ -150,10 +156,11 @@ Fila com limites e deduplicação por chave de região. Cada job carrega um `gen
 
 ## 8. Descoberta
 
-- **Superfície:** análise limitada de colunas e exposição ao redor do jogador, com orçamento por tick e atualização incremental em anéis conforme ele se move. Nunca raycast mundial.
-- **Subterrâneo:** união de (1) superfícies visíveis e expostas e (2) proximidade ao jogador e a espaços subterrâneos já descobertos. Blocos sólidos internos não são revelados apenas por estar em chunk carregado.
-- Transição para caverna aumenta a amostragem subterrânea; a política é configurável (raio, limite de amostras).
-- Chunk disponível ≠ terreno desconhecido revelado: `UNKNOWN` permanece oculto.
+- **Superfície (implementado):** cursor espiral sobre colunas no raio configurado; `WORLD_SURFACE` fornece o topo, amostrado junto com até dois blocos abaixo. Topo = `EXPOSED_SURFACE`; inferiores expostos lateralmente = `SOLID`. Sem raycast.
+- **Subterrâneo (implementado):** BFS limitado a partir do bloco do jogador e seus 6 vizinhos. Ar conectado abaixo do heightmap = `UNDERGROUND_SPACE`; acima dele = `KNOWN_AIR` sem expansão. Sólidos encontrados na fronteira = `SOLID`. Blocos internos de montanha não são revelados por estar em chunk carregado.
+- **Orçamento:** `max_samples_per_tick` divide-se entre ar e superfície; fila de ar limitada a 16.384 posições; rebase do cursor após 8 blocos de deslocamento, mudança de raio, dimensão ou mundo.
+- **Estado:** `UNKNOWN` nunca é escrito no modelo; troca de dimensão preserva dados, troca de mundo troca o mapa. A persistência (Fase 4) ainda não existe, então o estado descoberto é volátil entre sessões.
+- Ainda não implementado: detecção de mudanças de bloco, visibilidade direcional (olhar) fora da conectividade de ar e medição de frame time em mundo grande.
 
 ## 9. Representação 3D, camadas, cutaway e LOD
 

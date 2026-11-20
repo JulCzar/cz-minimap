@@ -5,6 +5,7 @@ import com.czminimap.input.KeyBindings;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.bus.api.SubscribeEvent;
+import net.minecraft.client.Minecraft;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 
 @EventBusSubscriber(modid = CzMinimap.MOD_ID, value = Dist.CLIENT)
@@ -41,5 +42,6 @@ public final class ClientGameEvents {
         while (KeyBindings.LAYER_PREVIOUS.consumeClick()) {
             UI_STATE.changeLayer(-1);
         }
+        ClientMapContext.get().onClientTick(Minecraft.getInstance());
     }
 }
